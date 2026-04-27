@@ -1,0 +1,18 @@
+# 数据缓存（自动生成，体积大）
+stock_kline_cache.db
+.pybrokercache/
+
+# 回测图表（自动生成）
+回测结果图表.png
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
