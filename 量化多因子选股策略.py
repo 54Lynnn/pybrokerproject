@@ -29,6 +29,7 @@
 
 import pybroker as pyb
 from pybroker import ExecContext, StrategyConfig, Strategy
+from pybroker.common import FeeMode
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -112,6 +113,7 @@ class Config:
 
     # -------- 资金与风控参数 --------
     INITIAL_CASH = 1_000_000            # 初始资金（元）
+    FEE_RATE = 0.0008                   # 交易费率/笔（0.08%≈佣金0.03%+印花税0.1%卖出分摊）
     STOP_LOSS_PCT = -0.10               # 止损线：亏损10%止损
     TAKE_PROFIT_PCT = 0.30              # 止盈线：盈利30%止盈
     A_SHARE_LOT = 100                   # A股每手100股
@@ -912,6 +914,8 @@ def run_backtest(df):
     config = StrategyConfig(
         initial_cash=Config.INITIAL_CASH,
         max_long_positions=Config.TOP_N_STOCKS,  # 最大同时持仓数
+        fee_mode=FeeMode.ORDER_PERCENT,           # 按订单金额比例收费
+        fee_amount=Config.FEE_RATE,                  # 0.08%/笔 ≈ A股真成本
     )
 
     # ---- 创建策略对象 ----
