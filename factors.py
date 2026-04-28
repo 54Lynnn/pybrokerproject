@@ -30,11 +30,13 @@ def compute_factor_scores(df):
 
     # ===== Step 1: 计算原始因子值 =====
 
-    # Factor 1: 20日动量（强趋势股得分高）
-    df['f_momentum_20d'] = df['return_20d']
+    # Factor 1: 20日动量 — IC=-0.033，方向翻转为均值回归
+    # 高动量股在后续5日跑输 → 跌得多、近期弱势股反而有反弹空间
+    df['f_momentum_20d'] = -df['return_20d']
 
-    # Factor 2: 量比（放量股得分高）
-    df['f_volume_ratio'] = df['volume_ratio'].clip(0.1, 5.0)
+    # Factor 2: 量比 — IC=-0.011，方向翻转
+    # 放量股后续偏弱 → 缩量低换手的票更安全
+    df['f_volume_ratio'] = -df['volume_ratio'].clip(0.1, 5.0)
 
     # Factor 3: RSI 得分 — 峰值在 RSI=35（超卖反转），RSI>70 得分低
     # RSI 原理：RSI<30=超卖（价格低估，可能反弹），RSI>70=超买（涨过头）
@@ -43,14 +45,13 @@ def compute_factor_scores(df):
     df['f_rsi_score'] = 100 - ((rsi - 35) ** 2) / 200
     df['f_rsi_score'] = df['f_rsi_score'].clip(0, 100)
 
-    # Factor 4: MACD 得分 — DIF 上穿 DEA（金叉）得分高
-    # DIF > DEA = 多头信号；DIF <= DEA = 不参与
+    # Factor 4: MACD 得分 — IC=-0.021，方向翻转
+    # 金叉(DIF>DEA)反而跑输 → 死叉/低位股有回归空间，DIF低于DEA得分高
     dif = df['macd_dif'].fillna(0).values
     dea = df['macd_dea'].fillna(0).values
     close_vals = df['close'].values
-    # 用 sigmoid 函数：DIF 超过 DEA 越多分越高，DIF 低于 DEA → 分趋近 0
-    raw_macd = (dif - dea) / (close_vals + 0.01)  # 归一化：价差 ÷ 股价
-    df['f_macd_score'] = 100 / (1 + np.exp(-200 * raw_macd))  # sigmoid，0~100
+    raw_macd = (dea - dif) / (close_vals + 0.01)   # 翻转: DEA > DIF 得分高
+    df['f_macd_score'] = 100 / (1 + np.exp(-200 * raw_macd))
 
     # Factor 5: KDJ 得分 — K/D/J 均 < 20 且 K>D（偏离点金叉）→ 满分
     k_vals = df['kdj_k'].fillna(50).values
