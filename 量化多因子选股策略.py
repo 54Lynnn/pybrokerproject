@@ -813,7 +813,7 @@ def rank(ctxs: dict[str, ExecContext]):
 
     # 信号是 T 日收盘产生 → T+1 日执行 → 找前一天
     target_date = bar_date - pd.Timedelta(days=1)
-    for _ in range(10):
+    for _ in range(15):   # 15天覆盖最长假期（春节7天+两端周末）
         if target_date in SELECTION_MAP:
             break
         target_date -= pd.Timedelta(days=1)
