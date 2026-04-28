@@ -3,7 +3,7 @@ stock_kline_cache.db
 .pybrokercache/
 
 # 回测图表（自动生成）
-回测结果图表.png
+图表/
 
 # Python
 __pycache__/

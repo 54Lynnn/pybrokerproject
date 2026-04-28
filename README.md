@@ -114,7 +114,7 @@ E:\project\pybroker\
 ├── 量化多因子选股策略.py   # 主程序（唯一运行入口）
 ├── 期货多空策略.ipynb       # 参考 Notebook（期货策略示例）
 ├── stock_kline_cache.db     # SQLite 数据缓存（自动生成）
-├── 回测结果图表.png          # 可视化图表（自动生成）
+├── 图表/                    # 可视化图表目录（自动生成，按时间戳命名）
 ├── README.md                # 本文件
 └── requirements.txt         # 依赖清单
 ```

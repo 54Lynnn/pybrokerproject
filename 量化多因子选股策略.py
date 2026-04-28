@@ -1166,14 +1166,14 @@ def plot_results(result, df):
 
     # ---- 保存并显示图表 ----
     plt.tight_layout()
-    output_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        '回测结果图表.png'
-    )
+    charts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '图表')
+    os.makedirs(charts_dir, exist_ok=True)
+    chart_filename = datetime.now().strftime('%Y%m%d-%H%M%S') + '.png'
+    output_path = os.path.join(charts_dir, chart_filename)
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"  ✓ 图表已保存到: {output_path}")
-    plt.show(block=False)       # 不阻塞程序继续运行
-    plt.pause(0.5)              # 给窗口短暂渲染时间
+    plt.show(block=False)
+    plt.pause(0.5)
 
 
 # ============================================================
@@ -1308,7 +1308,7 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"  策略运行完毕！")
     print(f"  数据库文件: {Config.SQLITE_DB_PATH}")
-    print(f"  图表文件: {os.path.join(os.path.dirname(os.path.abspath(__file__)), '回测结果图表.png')}")
+    print(f"  图表目录: {os.path.join(os.path.dirname(os.path.abspath(__file__)), '图表')}")
     print(f"{'=' * 60}")
 
 
