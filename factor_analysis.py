@@ -4,26 +4,29 @@
 from config import Config
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 def compute_forward_return(df, horizon_days):
-    """计算每只股票未来 N 日收益率。"""
+    """向量化计算每只股票未来 N 日收益率（按月分组+shift）。"""
     df = df.sort_values(['symbol', 'date']).reset_index(drop=True)
-    close = df['close'].values
-    df['fwd_return'] = np.nan
-    for i, (sym, date) in enumerate(zip(df['symbol'], df['date'])):
-        fut = df[(df['symbol'] == sym) & (df['date'] > date)].head(horizon_days)
-        if len(fut) >= max(1, horizon_days // 2):
-            df.at[i, 'fwd_return'] = fut['close'].iloc[-1] / df.at[i, 'close'] - 1
+    df['fwd_close'] = df.groupby('symbol')['close'].shift(-horizon_days)
+    df['fwd_return'] = df['fwd_close'] / df['close'] - 1
+    df.drop(columns=['fwd_close'], inplace=True)
     return df
 
 
-def _safe_ic(rank_a, rank_b):
-    """Spearman rank IC, skip NaN."""
-    mask = rank_a.notna() & rank_b.notna()
-    if mask.sum() < 30:
+def _spearman_rank_ic(a, b):
+    """纯 NumPy Spearman rank IC（避免 scipy Fortran crash）。"""
+    mask = ~np.isnan(a) & ~np.isnan(b)
+    a, b = a[mask], b[mask]
+    n = len(a)
+    if n < 30:
         return np.nan
-    return stats.spearmanr(rank_a[mask], rank_b[mask]).correlation
+    ra = np.argsort(np.argsort(a)).astype(float) + 1
+    rb = np.argsort(np.argsort(b)).astype(float) + 1
+    ra_mean = np.mean(ra); rb_mean = np.mean(rb)
+    num = np.sum((ra - ra_mean) * (rb - rb_mean))
+    den = np.sqrt(np.sum((ra - ra_mean) ** 2) * np.sum((rb - rb_mean) ** 2))
+    return num / den if den > 0 else np.nan
 
 
 def evaluate_factors(df, horizons=(1, 5, 10)):
@@ -56,7 +59,7 @@ def evaluate_factors(df, horizons=(1, 5, 10)):
         df_with_fwd = compute_forward_return(df, h)
         daily_ics = []
         for d, grp in df_with_fwd.groupby('date'):
-            ic = _safe_ic(grp['composite_score'], grp['fwd_return'])
+            ic = _spearman_rank_ic(grp['composite_score'], grp['fwd_return'])
             if not np.isnan(ic):
                 daily_ics.append(ic)
         if daily_ics:
@@ -83,7 +86,7 @@ def evaluate_factors(df, horizons=(1, 5, 10)):
         if col in df.columns:
             daily_ics = []
             for d, grp in df_fwd5.groupby('date'):
-                ic = _safe_ic(grp[col], grp['fwd_return'])
+                ic = _spearman_rank_ic(grp[col], grp['fwd_return'])
                 if not np.isnan(ic):
                     daily_ics.append(ic)
             if daily_ics:
