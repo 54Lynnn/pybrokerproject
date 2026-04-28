@@ -29,7 +29,8 @@
 
 import pybroker as pyb
 from pybroker import ExecContext, StrategyConfig, Strategy
-from pybroker.common import FeeMode
+from pybroker.common import FeeInfo
+from decimal import Decimal
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -113,7 +114,8 @@ class Config:
 
     # -------- 资金与风控参数 --------
     INITIAL_CASH = 1_000_000            # 初始资金（元）
-    FEE_RATE = 0.0008                   # 交易费率/笔（0.08%≈佣金0.03%+印花税0.1%卖出分摊）
+    COMMISSION_RATE = 0.00025           # 佣金费率（买卖双向）：0.025%
+    STAMP_DUTY_RATE = 0.001             # 印花税率（卖出单向）：0.1%
     STOP_LOSS_PCT = -0.10               # 止损线：亏损10%止损
     TAKE_PROFIT_PCT = 0.30              # 止盈线：盈利30%止盈
     A_SHARE_LOT = 100                   # A股每手100股
@@ -854,6 +856,29 @@ def execute_strategy(ctx: ExecContext):
 # 模块7：回测执行
 # ============================================================
 
+def a_share_fee(info: FeeInfo) -> Decimal:
+    """
+    A 股真实费率函数。
+
+    收费标准：
+      - 佣金 0.025%（买卖双向）
+      - 印花税 0.1%（仅卖出）
+
+    Args:
+        info: pybroker 传入的 FeeInfo，含 order_type / shares / fill_price
+
+    Returns:
+        Decimal: 该笔交易的费用（元）
+    """
+    amount = info.shares * info.fill_price
+    commission = float(amount) * Config.COMMISSION_RATE
+    if info.order_type == 'sell':
+        stamp = float(amount) * Config.STAMP_DUTY_RATE
+    else:
+        stamp = 0.0
+    return Decimal(str(commission + stamp))
+
+
 def run_backtest(df):
     """
     使用 pybroker 执行多因子选股策略回测（官方轮动交易模式）。
@@ -914,8 +939,7 @@ def run_backtest(df):
     config = StrategyConfig(
         initial_cash=Config.INITIAL_CASH,
         max_long_positions=Config.TOP_N_STOCKS,  # 最大同时持仓数
-        fee_mode=FeeMode.ORDER_PERCENT,           # 按订单金额比例收费
-        fee_amount=Config.FEE_RATE,                  # 0.08%/笔 ≈ A股真成本
+        fee_mode=a_share_fee,                     # A股真实费率（买0.025%/卖0.125%）
     )
 
     # ---- 创建策略对象 ----
