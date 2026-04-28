@@ -114,6 +114,7 @@ class Config:
 
     # -------- 选股参数 --------
     TOP_N_STOCKS = 5                    # 每日选股数量（持仓股票数上限）
+    SELL_THRESHOLD = 15                 # 卖出阈值：排名超过此值才卖出（降低换手）
     FACTOR_WEIGHTS = {                  # 各因子权重（总和为1）
         'momentum_20d': 0.20,           # 20日动量
         'volume_ratio': 0.15,           # 量比
@@ -745,20 +746,10 @@ def compute_factor_scores(df):
     df['f_kdj_score'] = (kdj_low + kdj_cross + kdj_j_ok) * 100
     df['f_kdj_score'] = df['f_kdj_score'].clip(0, 100)
 
-    # Factor 6: 布林带得分 — 价格跌破下轨（超跌）、未破中轨 → 满分
-    low_vals = df['low'].values
-    mid = df['ma_20'].values
-    # 简单近似：mid ≈ BB 中轨（20日均线），lower ≈ mid - 2σ
-    # 用 20 日最低价做 proxy for lower band（ta-lib 的 BB 需要单独算）
-    roll_low = df['low'].rolling(window=20, min_periods=1).min().values
-    roll_high = df['high'].rolling(window=20, min_periods=1).max().values
-    # lower_band ≈ 中轨 - (上轨-中轨) = mid - (roll_high - mid) ≈ 2*mid - roll_high
-    # 简化：用收盘价与 20 日内最低、最高价的位置
-    bb_range = roll_high - roll_low
-    bb_range = np.where(bb_range == 0, 1, bb_range)
-    bb_position = (close_vals - roll_low) / bb_range  # 0=下轨, 1=上轨
-    # 价格偏离下轨（超跌）得分高；涨过中轨(0.5)后得分归零
-    df['f_bb_score'] = np.where(bb_position < 0.5, (0.5 - bb_position) * 200, 0)
+    # Factor 6: 布林带得分 — 收盘价跌破下轨（超跌反弹机会）得分高
+    bb = df['bb_pct_b'].fillna(0.5).clip(-0.5, 1.5).values
+    # %b < 0 = 跌破下轨 → 超跌 → 得分高；%b > 0.5 → 涨过中轨 → 0分
+    df['f_bb_score'] = np.where(bb < 0.5, (0.5 - bb) * 100, 0)
     df['f_bb_score'] = df['f_bb_score'].clip(0, 100)
 
     # Factor 7: ATR 得分 — 低波动得分高
@@ -801,9 +792,9 @@ def compute_factor_scores(df):
     df['rank'] = df.groupby('date')['composite_score'].rank(ascending=False, method='first')
 
     # ===== Step 5: 选股信号 =====
-    df['selected'] = np.where(df['rank'] <= Config.TOP_N_STOCKS, 1, 0)
+    df['selected'] = np.where(df['rank'] <= Config.SELL_THRESHOLD, 1, 0)
 
-    print(f"  ✓ 因子得分计算完成，每日选取前 {Config.TOP_N_STOCKS} 只股票")
+    print(f"  ✓ 因子得分计算完成，每日选取前 {Config.TOP_N_STOCKS} 只（卖出阈值: 前 {Config.SELL_THRESHOLD} 只）")
     return df
 
 
@@ -861,12 +852,17 @@ def rank(ctxs: dict[str, ExecContext]):
         target_date -= pd.Timedelta(days=1)
 
     if target_date in SELECTION_MAP:
-        top_list = list(SELECTION_MAP[target_date])
+        all_selected = list(SELECTION_MAP[target_date])
+        # top_symbols = 前 TOP_N 只（买入候选）
+        # keep_symbols = 全部前 SELL_THRESHOLD 只（持仓股票排名在前 SELL_THRESHOLD 就保留）
+        top_list = all_selected[:Config.TOP_N_STOCKS]
+        keep_list = all_selected
     else:
         top_list = []
+        keep_list = []
 
-    # 存入全局参数供 exec 函数读取
     pyb.param('top_symbols', top_list)
+    pyb.param('keep_symbols', keep_list)
     pyb.param('target_size', 1.0 / Config.TOP_N_STOCKS)
 
 
@@ -886,17 +882,18 @@ def execute_strategy(ctx: ExecContext):
       - ctx.buy_shares / ctx.buy_limit_price → 下单
     """
     top_symbols = pyb.param('top_symbols')
+    keep_symbols = pyb.param('keep_symbols')
     target_size = pyb.param('target_size')
 
     pos = ctx.long_pos()
 
-    # 情况1：有持仓，但已不在选股列表中 → 清仓
+    # 情况1：有持仓 → 排名在 SELL_THRESHOLD 以内则保留，否则清仓
     if pos:
-        if ctx.symbol not in top_symbols:
+        if ctx.symbol not in keep_symbols:
             ctx.sell_all_shares()
-        return  # 继续持有，不操作
+        return
 
-    # 情况2：无持仓，且在选股列表中 → 买入
+    # 情况2：无持仓且在前 TOP_N → 买入
     if ctx.symbol in top_symbols:
         ctx.buy_shares = ctx.calc_target_shares(target_size)
         ctx.buy_limit_price = ctx.close[-1]
@@ -958,6 +955,7 @@ def run_backtest(df):
 
     # 初始化全局参数默认值
     pyb.param('top_symbols', [])
+    pyb.param('keep_symbols', [])
     pyb.param('target_size', 1.0 / Config.TOP_N_STOCKS)
 
     # ---- 准备 OHLCV 数据 ----
