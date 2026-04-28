@@ -113,8 +113,8 @@ class Config:
     ATR_PERIOD = 14                     # ATR 周期
 
     # -------- 选股参数 --------
-    TOP_N_STOCKS = 5                    # 每日选股数量（持仓股票数上限）
-    SELL_THRESHOLD = 15                 # 卖出阈值：排名超过此值才卖出（降低换手）
+    TOP_N_STOCKS = 10                   # 每日持仓股票数量上限（分散持仓，降风险）
+    SELL_THRESHOLD = TOP_N_STOCKS * 3   # 卖出阈值：排名超过此值才卖出（自动 3x TOP_N）
     MIN_HOLD_BARS = 5                   # 最低持有天数（强制降低换手，减少手续费）
     FACTOR_WEIGHTS = {                  # 各因子权重（总和为1）
         'momentum_20d': 0.20,           # 20日动量
