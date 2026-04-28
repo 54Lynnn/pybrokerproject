@@ -11,9 +11,10 @@ pybroker>=1.2.0
 baostock>=0.8.8          # A 股历史日 K 线、估值数据（免费）
 akshare>=1.15.0          # A 股指数成分股、金融数据接口
 
-# 数据处理与计算
+# 数据计算与统计
 numpy>=1.24.0
 pandas>=2.0.0
+scipy>=1.10.0           # IC 分析 (Spearman rank)
 
 # 可视化
 matplotlib>=3.7.0

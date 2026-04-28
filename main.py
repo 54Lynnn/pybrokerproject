@@ -81,6 +81,7 @@ from config import Config
 from data_sources import get_zz500_stocks, download_all_stocks_data, load_kline_from_sqlite
 from indicators import compute_all_indicators
 from factors import compute_factor_scores
+from factor_analysis import evaluate_factors
 from strategy import a_share_fee
 from backtest import run_backtest, display_results, plot_results
 
@@ -198,6 +199,11 @@ def main():
     print(f"  步骤4: 多因子打分与选股")
     print(f"{'=' * 60}")
     df = compute_factor_scores(df)
+
+    print(f"\n{'=' * 60}")
+    print(f"  步骤4.5: 因子评估")
+    print(f"{'=' * 60}")
+    evaluate_factors(df)
 
     print(f"\n{'=' * 60}")
     print(f"  步骤5: 执行回测")
