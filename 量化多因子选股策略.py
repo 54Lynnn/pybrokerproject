@@ -762,6 +762,13 @@ def compute_factor_scores(df):
     factor_cols = ['f_momentum_20d', 'f_volume_ratio', 'f_rsi_score',
                    'f_macd_score', 'f_kdj_score', 'f_bb_score', 'f_atr_score']
 
+    # 因子平滑：每只股票每个因子做 5 日滚动均值，消除日间噪声
+    df = df.sort_values(['symbol', 'date']).reset_index(drop=True)
+    for col in factor_cols:
+        df[col] = df.groupby('symbol')[col].transform(
+            lambda x: x.rolling(5, min_periods=1).mean()
+        )
+
     print(f"\n  正在进行截面标准化（{df['date'].nunique()} 个交易日）...")
     result_list = []
     dates = sorted(df['date'].unique())
