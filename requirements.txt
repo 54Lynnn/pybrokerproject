@@ -18,6 +18,9 @@ pandas>=2.0.0
 # 可视化
 matplotlib>=3.7.0
 
+# 技术指标计算（C底层，162个指标）
+ta-lib>=0.4.0
+
 # 标准库（无需安装，仅列依赖关系）
 # sqlite3
 # threading

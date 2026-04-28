@@ -1,24 +1,29 @@
 # -*- coding: utf-8 -*-
 """
 ============================================================
-  基于 pybroker 的 A股 多因子选股策略（多头策略）
+  基于 pybroker 的 A股 多因子选股策略（纯技术指标轮动）
   数据来源：baostock（行情）+ akshare（指数成分股）
-  回测框架：pybroker
+  指标计算：ta-lib（C底层，162个指标）
+  回测框架：pybroker 1.2
   可视化：matplotlib
 ============================================================
 
 策略流程：
   1. 通过 akshare 获取中证500指数成分股列表
-  2. 通过 baostock 获取每只股票的日K线数据（最近2年）
+  2. 通过 baostock 获取每只股票的日K线数据
   3. 数据缓存到本地 SQLite 数据库，避免重复下载
-  4. 计算多个技术面和估值因子
-  5. 每日对股票进行综合打分，选取排名靠前的股票
-  6. 使用 pybroker 进行回测
-  7. 可视化回测结果（收益曲线、回撤、月度收益等）
+  4. 用 ta-lib 计算技术指标（RSI/MACD/KDJ/布林带/ATR/动量/量比）
+  5. 7因子截面标准化 + 加权打分，每日选取排名前5的股票
+  6. 使用 pybroker（官方轮动交易模式）进行回测
+  7. 可视化回测结果（收益曲线/回撤/月度收益/统计面板）
+
+因子体系（7因子纯技术指标）：
+  动量 20%、量比 15%、RSI 10%、MACD 15%、KDJ 15%、布林带 15%、ATR 10%
 
 使用方式：
   在你的 Anaconda 环境中直接运行此文件即可：
   python E:/project/pybroker/量化多因子选股策略.py
+  python E:/project/pybroker/量化多因子选股策略.py --start 2023-01-01 --end 2025-12-31
 """
 
 
@@ -47,6 +52,7 @@ import argparse
 # 导入数据源库
 import baostock as bs           # 免费A股历史行情数据
 import akshare as ak            # A股指数成分股、各类金融数据
+import talib                    # 技术指标库（C底层, 162个指标）
 
 # 正常显示中文和负号（Windows下常见问题）
 from pylab import mpl
@@ -96,20 +102,26 @@ class Config:
     STOCK_LIMIT = None                  # 股票数量限制（None=全部，设为50可快速测试）
 
     # -------- 因子参数 --------
-    MA_SHORT = 5                        # 短期均线周期
-    MA_LONG = 20                        # 长期均线周期
     RSI_PERIOD = 14                     # RSI 计算周期
-    VOLUME_MA_PERIOD = 20               # 成交量均线周期
+    MACD_FAST = 12                      # MACD 快线周期
+    MACD_SLOW = 26                      # MACD 慢线周期
+    MACD_SIGNAL = 9                     # MACD 信号线周期
+    KDJ_PERIOD = 9                      # KDJ 计算周期
     MOMENTUM_PERIOD = 20                # 动量计算周期
+    VOLUME_MA_PERIOD = 20               # 成交量均线周期
+    BB_PERIOD = 20                      # 布林带周期
+    ATR_PERIOD = 14                     # ATR 周期
 
     # -------- 选股参数 --------
     TOP_N_STOCKS = 5                    # 每日选股数量（持仓股票数上限）
     FACTOR_WEIGHTS = {                  # 各因子权重（总和为1）
-        'earnings_yield': 0.25,         # 盈利收益率（1/PE）
-        'book_yield': 0.20,             # 净资产收益率（1/PB）
         'momentum_20d': 0.20,           # 20日动量
         'volume_ratio': 0.15,           # 量比
-        'rsi_score': 0.20,              # RSI 信号得分
+        'rsi_score': 0.10,              # RSI 信号得分
+        'macd_score': 0.15,             # MACD 信号得分
+        'kdj_score': 0.15,              # KDJ 信号得分
+        'bb_score': 0.15,               # 布林带信号得分
+        'atr_score': 0.10,              # 低波动得分（ATR越高波动越大→得分越低）
     }
 
     # -------- 资金与风控参数 --------
@@ -590,49 +602,61 @@ def load_kline_from_sqlite(stocks_df):
 
 def compute_indicators_for_group(group_df):
     """
-    对单只股票的时间序列数据计算所有技术指标和因子。
+    用 ta-lib 计算单只股票的全部技术指标。
 
-    此函数会被 pandas groupby 对每只股票分别调用。
-    计算内容包括：RSI、动量、量比、均线偏离等。
-
-    Args:
-        group_df: 单只股票的时间序列 DataFrame（已按日期升序排列）
-
-    Returns:
-        pd.DataFrame: 添加了指标列的 DataFrame
+    指标一览：
+      - RSI(14)        — 相对强弱
+      - MACD(12/26/9)  — DIF / DEA / 柱
+      - KDJ(9)         — K / D / J
+      - 布林带(20)      — %b 位置
+      - 20日动量        — 近20日涨跌幅
+      - 量比            — 成交量 / 20日均量
+      - ATR(14)        — 平均真实波幅
+      - MA5 / MA20     — 均线
     """
     group_df = group_df.copy().sort_values('date').reset_index(drop=True)
+    high = group_df['high'].values.astype(float)
+    low = group_df['low'].values.astype(float)
     close = group_df['close'].values.astype(float)
     volume = group_df['volume'].values.astype(float)
 
-    # ---- RSI（相对强弱指标）----
-    # RSI = 100 - 100/(1 + RS)，其中 RS = N日内上涨平均值 / N日内下跌平均值
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # ---- RSI ----
+    group_df['rsi'] = talib.RSI(close, timeperiod=Config.RSI_PERIOD)
 
-    # 使用指数移动平均平滑
-    avg_gain = pd.Series(gain).ewm(span=Config.RSI_PERIOD, min_periods=Config.RSI_PERIOD, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=Config.RSI_PERIOD, min_periods=Config.RSI_PERIOD, adjust=False).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
-    group_df['rsi'] = 100 - 100 / (1 + rs)
+    # ---- MACD ----
+    macd_dif, macd_dea, macd_hist = talib.MACD(
+        close, fastperiod=Config.MACD_FAST, slowperiod=Config.MACD_SLOW,
+        signalperiod=Config.MACD_SIGNAL)
+    group_df['macd_dif'] = macd_dif
+    group_df['macd_dea'] = macd_dea
+    group_df['macd_hist'] = macd_hist
 
-    # ---- 动量（N日收益率）----
-    # 动量反映股票的近期价格趋势
-    group_df['return_5d'] = group_df['close'] / group_df['close'].shift(5) - 1     # 5日收益率
-    group_df['return_20d'] = group_df['close'] / group_df['close'].shift(20) - 1   # 20日收益率
+    # ---- KDJ ----
+    k, d = talib.STOCH(high, low, close,
+                       fastk_period=Config.KDJ_PERIOD, slowk_period=3, slowd_period=3)
+    j = 3 * k - 2 * d
+    group_df['kdj_k'] = k
+    group_df['kdj_d'] = d
+    group_df['kdj_j'] = j
 
-    # ---- 量比（成交量 / N日均量）----
-    # 量比 > 1 表示当日成交活跃，可能伴随行情变化
+    # ---- 布林带 %b ----
+    bb_upper, bb_mid, bb_lower = talib.BBANDS(close, timeperiod=Config.BB_PERIOD, nbdevup=2, nbdevdn=2)
+    group_df['bb_pct_b'] = np.where(bb_upper != bb_lower,
+                                     (close - bb_lower) / (bb_upper - bb_lower), 0.5)
+
+    # ---- 20日动量 ----
+    group_df['return_20d'] = close / pd.Series(close).shift(Config.MOMENTUM_PERIOD).values - 1
+
+    # ---- 量比 ----
     vol_ma = pd.Series(volume).rolling(window=Config.VOLUME_MA_PERIOD, min_periods=1).mean().values
     group_df['volume_ratio'] = np.divide(volume, vol_ma, out=np.ones_like(volume), where=vol_ma > 0)
 
-    # ---- 均线 ----
-    group_df['ma_5'] = group_df['close'].rolling(window=Config.MA_SHORT, min_periods=1).mean()
-    group_df['ma_20'] = group_df['close'].rolling(window=Config.MA_LONG, min_periods=1).mean()
+    # ---- ATR ----
+    group_df['atr'] = talib.ATR(high, low, close, timeperiod=Config.ATR_PERIOD)
 
-    # ---- 波动率（20日年化波动率）----
-    group_df['volatility_20d'] = group_df['pctChg'].rolling(window=20, min_periods=5).std()
+    # ---- 均线（保留用于参考） ----
+    group_df['ma_5'] = talib.SMA(close, timeperiod=5)
+    group_df['ma_20'] = talib.SMA(close, timeperiod=20)
 
     return group_df
 
@@ -643,12 +667,6 @@ def compute_all_indicators(df):
 
     使用手动分组循环代替 groupby.apply，避免不同 pandas 版本
     中 include_groups=False 等参数导致的列丢失问题。
-
-    Args:
-        df: 原始日K线 DataFrame
-
-    Returns:
-        pd.DataFrame: 添加了所有技术指标列的 DataFrame
     """
     print(f"\n[因子] 正在计算技术指标...")
 
@@ -665,31 +683,28 @@ def compute_all_indicators(df):
             print(f"  指标计算进度: {i+1}/{total_syms} ({100*(i+1)/total_syms:.0f}%)")
 
     df = pd.concat(result_list, ignore_index=True)
-    print(f"  ✓ 指标计算完成：RSI、动量、量比、均线、波动率")
+    print(f"  ✓ 指标计算完成：RSI / MACD / KDJ / 布林带 / ATR / 动量 / 量比 / 均线")
     return df
 
 
 def compute_factor_scores(df):
     """
-    计算每个交易日每只股票的综合因子得分。
+    计算每个交易日每只股票的综合因子得分（7因子纯技术体系）。
 
-    因子体系（共5个因子）：
-      Factor 1 - 盈利收益率 (earnings_yield): 1/PE_TTM，越高表示估值越低越好
-      Factor 2 - 净资产收益率 (book_yield): 1/PB_MRQ，越高表示估值越低越好
-      Factor 3 - 20日动量 (momentum_20d): 过去20个交易日收益率，越高越好
-      Factor 4 - 量比 (volume_ratio): 当日成交量/20日均量，越高越活跃
-      Factor 5 - RSI得分 (rsi_score): RSI接近超卖区域得分高，捕捉反弹机会
+    因子体系：
+      Factor 1 - 20日动量 (momentum_20d)   — 强势股得分高
+      Factor 2 - 量比 (volume_ratio)       — 放量股得分高
+      Factor 3 - RSI得分 (rsi_score)       — RSI接近超卖区得分高（捕捉反转）
+      Factor 4 - MACD得分 (macd_score)     — DIF>DEA得分高（金叉区域）
+      Factor 5 - KDJ得分 (kdj_score)       — J值在20-80之间得分高（避免极端）
+      Factor 6 - 布林带得分 (bb_score)     — %b在0.2-0.8之间得分高（非极端）
+      Factor 7 - ATR得分 (atr_score)       — ATR较低得分高（低波动、回撤小）
 
     处理流程：
-      1. 对每个因子进行截面标准化（z-score），去除量纲差异
-      2. 根据因子方向调整符号（正向因子保持正号，反向因子取反）
-      3. 按权重加权求和得到综合得分
-
-    Args:
-        df: 包含所有指标和估值数据的 DataFrame
-
-    Returns:
-        pd.DataFrame: 添加了 'composite_score' 和 'rank' 列的 DataFrame
+      1. 计算原始因子值
+      2. 截面标准化（z-score）
+      3. 加权求和 → 综合得分
+      4. 每日排名 → selected=1
     """
     print(f"\n[因子] 正在计算多因子综合得分...")
 
@@ -697,34 +712,40 @@ def compute_factor_scores(df):
 
     # ===== Step 1: 计算原始因子值 =====
 
-    # 估值因子：处理 PE/PB 为0或负值的情况（用NaN替代）
-    pe = df['peTTM'].replace(0, np.nan).values
-    pb = df['pbMRQ'].replace(0, np.nan).values
-
-    # Factor 1: 盈利收益率 = 1/PE（PE越低，盈利收益率越高，越好）
-    df['f_earnings_yield'] = np.where((pe > 0) & (~np.isnan(pe)), 1.0 / pe, np.nan)
-
-    # Factor 2: 净资产收益率 = 1/PB（PB越低，净资产收益率越高，越好）
-    df['f_book_yield'] = np.where((pb > 0) & (~np.isnan(pb)), 1.0 / pb, np.nan)
-
-    # Factor 3: 20日动量（直接使用前期计算的 return_20d）
+    # Factor 1: 20日动量
     df['f_momentum_20d'] = df['return_20d']
 
-    # Factor 4: 量比（直接使用前期计算的 volume_ratio，裁剪极端值）
+    # Factor 2: 量比（裁剪极端值）
     df['f_volume_ratio'] = df['volume_ratio'].clip(0.1, 5.0)
 
-    # Factor 5: RSI信号得分
-    # 逻辑：RSI在30-40之间（超卖区附近）得分最高，RSI过高（超买）得分低
-    # 使用二次函数：score = 100 - (RSI - 35)^2 / 200，峰值在RSI=35
+    # Factor 3: RSI 得分 — 峰值在 RSI=35（超卖区附近），RSI>70 得分低
     rsi = df['rsi'].fillna(50).clip(0, 100).values
     df['f_rsi_score'] = 100 - ((rsi - 35) ** 2) / 200
     df['f_rsi_score'] = df['f_rsi_score'].clip(0, 100)
 
-    # ===== Step 2: 截面标准化（每个交易日对所有股票做 z-score） =====
-    factor_cols = ['f_earnings_yield', 'f_book_yield', 'f_momentum_20d',
-                   'f_volume_ratio', 'f_rsi_score']
+    # Factor 4: MACD 得分 — DIF 相对于 DEA 的位置（金叉区域得分高）
+    dif = df['macd_dif'].fillna(0).values
+    dea = df['macd_dea'].fillna(0).values
+    df['f_macd_score'] = dif - dea  # DIF > DEA = 正值 = 多头信号
 
-    # 手动循环代替 groupby.apply，避免 pandas 版本兼容性问题
+    # Factor 5: KDJ 得分 — J 值在 20-80 中间区域得分高，<0(钝化)或>100(超买)得分低
+    j_vals = df['kdj_j'].fillna(50).clip(-20, 120).values
+    df['f_kdj_score'] = 100 - ((j_vals - 50) ** 2) / 800
+    df['f_kdj_score'] = df['f_kdj_score'].clip(0, 100)
+
+    # Factor 6: 布林带得分 — %b 在 0.2-0.8 之间（中轨附近）得分高
+    bb = df['bb_pct_b'].fillna(0.5).clip(0, 1).values
+    df['f_bb_score'] = 100 - ((bb - 0.5) ** 2) / 0.5
+    df['f_bb_score'] = df['f_bb_score'].clip(0, 100)
+
+    # Factor 7: ATR 得分 — ATR 越低（低波动）得分越高
+    atr = df['atr'].fillna(0).values
+    df['f_atr_score'] = np.where(atr > 0, 1.0 / (atr / df['close'].values + 0.01), 0)
+
+    # ===== Step 2: 截面标准化 =====
+    factor_cols = ['f_momentum_20d', 'f_volume_ratio', 'f_rsi_score',
+                   'f_macd_score', 'f_kdj_score', 'f_bb_score', 'f_atr_score']
+
     print(f"\n  正在进行截面标准化（{df['date'].nunique()} 个交易日）...")
     result_list = []
     dates = sorted(df['date'].unique())
@@ -743,22 +764,18 @@ def compute_factor_scores(df):
 
     df = pd.concat(result_list, ignore_index=True)
 
-    # ===== Step 3: 综合得分加权求和 =====
+    # ===== Step 3: 加权求和 =====
     weights = Config.FACTOR_WEIGHTS
     df['composite_score'] = 0.0
+    for key, w in weights.items():
+        col = 'f_' + key
+        if col in df.columns:
+            df['composite_score'] += df[col].fillna(0) * w
 
-    df['composite_score'] += df['f_earnings_yield'].fillna(0) * weights['earnings_yield']
-    df['composite_score'] += df['f_book_yield'].fillna(0) * weights['book_yield']
-    df['composite_score'] += df['f_momentum_20d'].fillna(0) * weights['momentum_20d']
-    df['composite_score'] += df['f_volume_ratio'].fillna(0) * weights['volume_ratio']
-    df['composite_score'] += df['f_rsi_score'].fillna(0) * weights['rsi_score']
-
-    # ===== Step 4: 每日排名 =====
-    # rank=1 表示当天综合得分最高的股票
+    # ===== Step 4: 排名 =====
     df['rank'] = df.groupby('date')['composite_score'].rank(ascending=False, method='first')
 
-    # ===== Step 5: 生成选股信号 =====
-    # 排名在 TOP_N_STOCKS 以内的股票标记为 selected=1，否则为0
+    # ===== Step 5: 选股信号 =====
     df['selected'] = np.where(df['rank'] <= Config.TOP_N_STOCKS, 1, 0)
 
     print(f"  ✓ 因子得分计算完成，每日选取前 {Config.TOP_N_STOCKS} 只股票")
