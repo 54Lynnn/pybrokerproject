@@ -39,18 +39,18 @@ class Config:
     ATR_PERIOD = 14                     # ATR 周期
 
     # -------- 选股参数 --------
-    TOP_N_STOCKS = 15                  # 每日持仓股票数量上限（IC为正时扩大持股降风险）
-    SELL_THRESHOLD = TOP_N_STOCKS * 3  # 卖出阈值：TOP_N×3（半衰期~7天）
-    MIN_HOLD_BARS = 7                  # 最低持有天数（信号半衰期≈7天）
-    FACTOR_WEIGHTS = {                 # 9因子权重（总和=1，按IC分布：反转类强/动量类轻）
+    TOP_N_STOCKS = 10                  # 每日持仓股票数量上限
+    SELL_THRESHOLD = TOP_N_STOCKS * 3  # 卖出阈值：TOP_N×3（半衰期~8天）
+    MIN_HOLD_BARS = 8                  # 最低持有天数（信号半衰期≈8天）
+    FACTOR_WEIGHTS = {                 # 9因子权重（总和=1）
         'momentum_20d': 0.12,          # 20日动量(反转)
-        'momentum_5d': 0.08,           # 5日动量(追涨，与20日反转正交)
+        'momentum_5d': 0.08,           # 5日动量(追涨)
         'volume_ratio': 0.05,          # 量比(反转)
         'rsi_score': 0.15,            # RSI
         'macd_score': 0.08,           # MACD(反转)
         'kdj_score': 0.12,            # KDJ
         'bb_score': 0.12,             # 布林带
-        'cci_score': 0.08,            # CCI(趋势强度)
+        'cci_score': 0.08,            # CCI
         'atr_score': 0.20,            # ATR（最强）
     }
 

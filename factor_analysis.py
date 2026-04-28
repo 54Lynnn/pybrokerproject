@@ -72,17 +72,16 @@ def evaluate_factors(df, horizons=(1, 5, 10)):
             print(f"     forward {h:>2}d    |  {sign}{mean_ic:>6.4f} | {med_ic:>7.4f} | {ir:>6.3f} | {pos_pct:>5.1f}%")
 
     # ===== 2. 各因子 IC =====
-    factor_names = {
-        'f_momentum_20d': '动量', 'f_volume_ratio': '量比', 'f_rsi_score': 'RSI',
-        'f_macd_score': 'MACD', 'f_kdj_score': 'KDJ', 'f_bb_score': 'BB',
-        'f_atr_score': 'ATR'
-    }
+    # 自动发现所有 f_ 前缀的因子列
+    f_cols = sorted([c for c in df.columns if c.startswith('f_')])
+    f_labels = [c.replace('f_', '').replace('momentum', 'mom').replace('volume', 'vol').
+                replace('_score', '').replace('_ratio', '') for c in f_cols]
     print(f"\n  [2] 各因子 IC（forward 5d）")
     print(f"       因子    |   均值  |  正>0比例")
     print(f"  " + "-" * 40)
 
     df_fwd5 = compute_forward_return(df, 5)
-    for col, label in factor_names.items():
+    for col, label in zip(f_cols, f_labels):
         if col in df.columns:
             daily_ics = []
             for d, grp in df_fwd5.groupby('date'):
