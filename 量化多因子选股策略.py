@@ -138,30 +138,37 @@ def get_zz500_stocks():
     """
     print("\n[数据] 正在通过 akshare 获取中证500成分股列表...")
 
-    try:
-        # 调用 akshare 的指数成分股接口
-        df = ak.index_stock_cons_csindex(symbol=Config.INDEX_CODE)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            df = ak.index_stock_cons_csindex(symbol=Config.INDEX_CODE)
 
-        # 提取股票代码和名称
-        stocks = df[['成分券代码', '成分券名称']].copy()
-        stocks.columns = ['code', 'name']
+            stocks = df[['成分券代码', '成分券名称']].copy()
+            stocks.columns = ['code', 'name']
 
-        # 去除重复（同一股票可能在不同交易所上市，取第一个）
-        stocks = stocks.drop_duplicates(subset='code', keep='first')
-        stocks = stocks.reset_index(drop=True)
+            stocks = stocks.drop_duplicates(subset='code', keep='first')
+            stocks = stocks.reset_index(drop=True)
 
-        print(f"  ✓ 成功获取 {len(stocks)} 只中证500成分股")
+            print(f"  ✓ 成功获取 {len(stocks)} 只中证500成分股")
 
-        # 如果配置了股票数量限制，截取前 N 只（用于快速测试）
-        if Config.STOCK_LIMIT is not None and len(stocks) > Config.STOCK_LIMIT:
-            stocks = stocks.head(Config.STOCK_LIMIT)
-            print(f"  ⚠ 已限制为前 {Config.STOCK_LIMIT} 只股票（测试模式）")
+            if Config.STOCK_LIMIT is not None and len(stocks) > Config.STOCK_LIMIT:
+                stocks = stocks.head(Config.STOCK_LIMIT)
+                print(f"  ⚠ 已限制为前 {Config.STOCK_LIMIT} 只股票（测试模式）")
 
-        return stocks
+            return stocks
 
-    except Exception as e:
-        print(f"  ✗ 获取中证500成分股失败: {e}")
-        sys.exit(1)
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait = (attempt + 1) * 5
+                print(f"  ⚠ 获取失败（{attempt+1}/{max_retries}），{wait}秒后重试: {e}")
+                time.sleep(wait)
+            else:
+                print(f"  ✗ 获取中证500成分股失败: {e}")
+                if os.path.exists(Config.SQLITE_DB_PATH):
+                    print(f"  提示：数据库缓存仍可用，可修改 --start/--end 后重试")
+                return None
+
+    return None
 
 
 # ============================================================
@@ -1267,6 +1274,11 @@ def main():
     print(f"  步骤1: 获取中证500成分股列表")
     print(f"{'=' * 60}")
     stocks_df = get_zz500_stocks()
+
+    if stocks_df is None or stocks_df.empty:
+        print("\n  ✗ 无法获取成分股列表，回测终止")
+        print("  提示：akshare 可能暂时不可用，稍后重试或检查网络连接")
+        return
 
     print(f"\n{'=' * 60}")
     print(f"  步骤2: 下载/加载日K线数据")
