@@ -42,16 +42,14 @@ class Config:
     TOP_N_STOCKS = 10                  # 每日持仓股票数量上限
     SELL_THRESHOLD = TOP_N_STOCKS * 3  # 卖出阈值：TOP_N×3（半衰期~8天）
     MIN_HOLD_BARS = 8                  # 最低持有天数（信号半衰期≈8天）
-    FACTOR_WEIGHTS = {                 # 9因子权重（总和=1）
-        'momentum_20d': 0.12,          # 20日动量(反转)
-        'momentum_5d': 0.08,           # 5日动量(追涨)
-        'volume_ratio': 0.05,          # 量比(反转)
-        'rsi_score': 0.15,            # RSI
-        'macd_score': 0.08,           # MACD(反转)
-        'kdj_score': 0.12,            # KDJ
-        'bb_score': 0.12,             # 布林带
-        'cci_score': 0.08,            # CCI
-        'atr_score': 0.20,            # ATR（最强）
+    FACTOR_WEIGHTS = {                 # 7因子权重（按IC绝对值配比，总和=1）
+        'momentum_20d': 0.17,          # 20日动量(反转) IC=0.032
+        'volume_ratio': 0.07,          # 量比(反转) IC=0.011
+        'rsi_score': 0.16,            # RSI IC=0.030
+        'macd_score': 0.11,           # MACD(反转) IC=0.021
+        'kdj_score': 0.09,            # KDJ IC=0.017
+        'bb_score': 0.12,             # 布林带 IC=0.022
+        'atr_score': 0.28,            # ATR IC=0.051（最强）
     }
 
     # -------- 资金与风控参数 --------

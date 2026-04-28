@@ -76,16 +76,9 @@ def compute_factor_scores(df):
     atr = df['atr'].fillna(0).values
     df['f_atr_score'] = np.where(atr > 0, 1.0 / (atr / close_vals + 0.01), 0)
 
-    # Factor 8: 5日动量 — 短期追涨（与20日反转正交，牛市适用）
-    df['f_momentum_5d'] = df['return_5d']
-
-    # Factor 9: CCI — 趋势强度，极端负值回归
-    cci = df['cci'].fillna(0).clip(-300, 300).values
-    df['f_cci_score'] = -np.abs(cci)  # 负CCi(超卖)回归得分高，正CCI不追
-
     # ===== Step 2: 截面标准化 =====
-    factor_cols = ['f_momentum_20d', 'f_momentum_5d', 'f_volume_ratio', 'f_rsi_score',
-                   'f_macd_score', 'f_kdj_score', 'f_bb_score', 'f_cci_score', 'f_atr_score']
+    factor_cols = ['f_momentum_20d', 'f_volume_ratio', 'f_rsi_score',
+                   'f_macd_score', 'f_kdj_score', 'f_bb_score', 'f_atr_score']
 
     # 因子平滑：每只股票每个因子做 5 日滚动均值，消除日间噪声
     df = df.sort_values(['symbol', 'date']).reset_index(drop=True)
