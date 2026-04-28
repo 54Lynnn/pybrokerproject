@@ -57,6 +57,12 @@ def compute_indicators_for_group(group_df):
     vol_ma = pd.Series(volume).rolling(window=Config.VOLUME_MA_PERIOD, min_periods=1).mean().values
     group_df['volume_ratio'] = np.divide(volume, vol_ma, out=np.ones_like(volume), where=vol_ma > 0)
 
+    # ---- 5日动量 ----
+    group_df['return_5d'] = close / pd.Series(close).shift(5).values - 1
+
+    # ---- CCI（商品通道指数，捕捉趋势强度） ----
+    group_df['cci'] = talib.CCI(high, low, close, timeperiod=14)
+
     # ---- ATR ----
     group_df['atr'] = talib.ATR(high, low, close, timeperiod=Config.ATR_PERIOD)
 
@@ -89,5 +95,5 @@ def compute_all_indicators(df):
             print(f"  指标计算进度: {i+1}/{total_syms} ({100*(i+1)/total_syms:.0f}%)")
 
     df = pd.concat(result_list, ignore_index=True)
-    print(f"  ✓ 指标计算完成：RSI / MACD / KDJ / 布林带 / ATR / 动量 / 量比 / 均线")
+    print(f"  ✓ 指标计算完成：RSI / MACD / KDJ / 布林带 / CCI / ATR / 动量 / 量比 / 均线")
     return df
