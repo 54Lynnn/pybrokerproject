@@ -115,6 +115,7 @@ class Config:
     # -------- 选股参数 --------
     TOP_N_STOCKS = 5                    # 每日选股数量（持仓股票数上限）
     SELL_THRESHOLD = 15                 # 卖出阈值：排名超过此值才卖出（降低换手）
+    MIN_HOLD_BARS = 5                   # 最低持有天数（强制降低换手，减少手续费）
     FACTOR_WEIGHTS = {                  # 各因子权重（总和为1）
         'momentum_20d': 0.20,           # 20日动量
         'volume_ratio': 0.15,           # 量比
@@ -900,10 +901,13 @@ def execute_strategy(ctx: ExecContext):
             ctx.sell_all_shares()
         return
 
-    # 情况2：无持仓且在前 TOP_N → 买入
+    # 情况2：无持仓且在前 TOP_N → 买入（需满足趋势过滤）
     if ctx.symbol in top_symbols:
-        ctx.buy_shares = ctx.calc_target_shares(target_size)
-        ctx.buy_limit_price = ctx.close[-1]
+        # 趋势过滤：仅买入收盘价在 20 日均线之上的股票（避免接飞刀）
+        if ctx.bars >= 20 and ctx.close[-1] >= np.mean(ctx.close[-20:]):
+            ctx.buy_shares = ctx.calc_target_shares(target_size)
+            ctx.buy_limit_price = ctx.close[-1]
+            ctx.hold_bars = Config.MIN_HOLD_BARS  # 强制持有至少 5 天
 
 
 # ============================================================
