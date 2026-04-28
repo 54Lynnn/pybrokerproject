@@ -712,35 +712,60 @@ def compute_factor_scores(df):
 
     # ===== Step 1: 计算原始因子值 =====
 
-    # Factor 1: 20日动量
+    # Factor 1: 20日动量（强趋势股得分高）
     df['f_momentum_20d'] = df['return_20d']
 
-    # Factor 2: 量比（裁剪极端值）
+    # Factor 2: 量比（放量股得分高）
     df['f_volume_ratio'] = df['volume_ratio'].clip(0.1, 5.0)
 
-    # Factor 3: RSI 得分 — 峰值在 RSI=35（超卖区附近），RSI>70 得分低
+    # Factor 3: RSI 得分 — 峰值在 RSI=35（超卖反转），RSI>70 得分低
+    # RSI 原理：RSI<30=超卖（价格低估，可能反弹），RSI>70=超买（涨过头）
+    # 峰值设在 35 而非 30，因为 RSI=35 时"接近超卖但未极端"，胜率更高
     rsi = df['rsi'].fillna(50).clip(0, 100).values
     df['f_rsi_score'] = 100 - ((rsi - 35) ** 2) / 200
     df['f_rsi_score'] = df['f_rsi_score'].clip(0, 100)
 
-    # Factor 4: MACD 得分 — DIF 相对于 DEA 的位置（金叉区域得分高）
+    # Factor 4: MACD 得分 — DIF 上穿 DEA（金叉）得分高
+    # DIF > DEA = 多头信号；DIF <= DEA = 不参与
     dif = df['macd_dif'].fillna(0).values
     dea = df['macd_dea'].fillna(0).values
-    df['f_macd_score'] = dif - dea  # DIF > DEA = 正值 = 多头信号
+    close_vals = df['close'].values
+    # 用 sigmoid 函数：DIF 超过 DEA 越多分越高，DIF 低于 DEA → 分趋近 0
+    raw_macd = (dif - dea) / (close_vals + 0.01)  # 归一化：价差 ÷ 股价
+    df['f_macd_score'] = 100 / (1 + np.exp(-200 * raw_macd))  # sigmoid，0~100
 
-    # Factor 5: KDJ 得分 — J 值在 20-80 中间区域得分高，<0(钝化)或>100(超买)得分低
-    j_vals = df['kdj_j'].fillna(50).clip(-20, 120).values
-    df['f_kdj_score'] = 100 - ((j_vals - 50) ** 2) / 800
+    # Factor 5: KDJ 得分 — K/D/J 均 < 20 且 K>D（偏离点金叉）→ 满分
+    k_vals = df['kdj_k'].fillna(50).values
+    d_vals = df['kdj_d'].fillna(50).values
+    j_vals = df['kdj_j'].fillna(50).values
+    # 三个条件：①三个值都低越好 ②K>D(金叉)+分 ③J不能钝化太久
+    kdj_low = np.maximum(0, 20 - np.minimum(np.minimum(k_vals, d_vals), j_vals)) / 20  # 0~1
+    kdj_cross = np.where(k_vals > d_vals, 0.5, 0)  # 金叉 +0.5
+    kdj_j_ok = np.where((j_vals > 0) & (j_vals < 80), 0.3, -0.2)  # J不离群
+    df['f_kdj_score'] = (kdj_low + kdj_cross + kdj_j_ok) * 100
     df['f_kdj_score'] = df['f_kdj_score'].clip(0, 100)
 
-    # Factor 6: 布林带得分 — %b 在 0.2-0.8 之间（中轨附近）得分高
-    bb = df['bb_pct_b'].fillna(0.5).clip(0, 1).values
-    df['f_bb_score'] = 100 - ((bb - 0.5) ** 2) / 0.5
+    # Factor 6: 布林带得分 — 价格跌破下轨（超跌）、未破中轨 → 满分
+    low_vals = df['low'].values
+    mid = df['ma_20'].values
+    # 简单近似：mid ≈ BB 中轨（20日均线），lower ≈ mid - 2σ
+    # 用 20 日最低价做 proxy for lower band（ta-lib 的 BB 需要单独算）
+    roll_low = df['low'].rolling(window=20, min_periods=1).min().values
+    roll_high = df['high'].rolling(window=20, min_periods=1).max().values
+    # lower_band ≈ 中轨 - (上轨-中轨) = mid - (roll_high - mid) ≈ 2*mid - roll_high
+    # 简化：用收盘价与 20 日内最低、最高价的位置
+    bb_range = roll_high - roll_low
+    bb_range = np.where(bb_range == 0, 1, bb_range)
+    bb_position = (close_vals - roll_low) / bb_range  # 0=下轨, 1=上轨
+    # 价格偏离下轨（超跌）得分高；涨过中轨(0.5)后得分归零
+    df['f_bb_score'] = np.where(bb_position < 0.5, (0.5 - bb_position) * 200, 0)
     df['f_bb_score'] = df['f_bb_score'].clip(0, 100)
 
-    # Factor 7: ATR 得分 — ATR 越低（低波动）得分越高
+    # Factor 7: ATR 得分 — 低波动得分高
+    # ATR 原理：衡量股票的真实波动幅度（含跳空）。ATR 高 = 剧烈波动 = 风险大
+    # ATR 低 = 温和调整 = 更适合轮动入场
     atr = df['atr'].fillna(0).values
-    df['f_atr_score'] = np.where(atr > 0, 1.0 / (atr / df['close'].values + 0.01), 0)
+    df['f_atr_score'] = np.where(atr > 0, 1.0 / (atr / close_vals + 0.01), 0)
 
     # ===== Step 2: 截面标准化 =====
     factor_cols = ['f_momentum_20d', 'f_volume_ratio', 'f_rsi_score',
