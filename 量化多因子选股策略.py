@@ -132,45 +132,53 @@ class Config:
 
 def get_zz500_stocks():
     """
-    通过 akshare 获取中证500指数的成分股列表。
+    获取中证500成分股列表（带线程超时保护）。
 
-    中证500指数（000905）由全部A股中剔除沪深300指数成分股及总市值排名前300名
-    的股票后，总市值排名靠前的500只股票组成，综合反映A股市场中等市值公司的表现。
-
-    Returns:
-        pd.DataFrame: 包含 'code'（股票代码）和 'name'（股票名称）两列的 DataFrame
+    中证500指数（000905）成分股，源自 akshare 的 index_stock_cons_csindex。
+    该接口偶发网络卡死（不抛异常直接hang），因此使用子线程 + 超时方案。
     """
     print("\n[数据] 正在通过 akshare 获取中证500成分股列表...")
 
     max_retries = 3
     for attempt in range(max_retries):
-        try:
-            df = ak.index_stock_cons_csindex(symbol=Config.INDEX_CODE)
+        result = {}
+        t = threading.Thread(target=lambda: result.update(
+            {'df': ak.index_stock_cons_csindex(symbol=Config.INDEX_CODE)}
+        ), daemon=True)
+        t.start()
+        t.join(timeout=60)
 
-            stocks = df[['成分券代码', '成分券名称']].copy()
-            stocks.columns = ['code', 'name']
-
-            stocks = stocks.drop_duplicates(subset='code', keep='first')
-            stocks = stocks.reset_index(drop=True)
-
-            print(f"  ✓ 成功获取 {len(stocks)} 只中证500成分股")
-
-            if Config.STOCK_LIMIT is not None and len(stocks) > Config.STOCK_LIMIT:
-                stocks = stocks.head(Config.STOCK_LIMIT)
-                print(f"  ⚠ 已限制为前 {Config.STOCK_LIMIT} 只股票（测试模式）")
-
-            return stocks
-
-        except Exception as e:
+        if t.is_alive():
             if attempt < max_retries - 1:
                 wait = (attempt + 1) * 5
-                print(f"  ⚠ 获取失败（{attempt+1}/{max_retries}），{wait}秒后重试: {e}")
+                print(f"  ⚠ akshare 超时（{attempt+1}/{max_retries}），{wait}秒后重试...")
                 time.sleep(wait)
-            else:
-                print(f"  ✗ 获取中证500成分股失败: {e}")
-                if os.path.exists(Config.SQLITE_DB_PATH):
-                    print(f"  提示：数据库缓存仍可用，可修改 --start/--end 后重试")
-                return None
+                continue
+            print(f"  ✗ akshare 多次超时，请稍后重试")
+            return None
+
+        if 'df' not in result:
+            if attempt < max_retries - 1:
+                wait = (attempt + 1) * 5
+                print(f"  ⚠ 获取失败（{attempt+1}/{max_retries}），{wait}秒后重试...")
+                time.sleep(wait)
+                continue
+            print(f"  ✗ 获取中证500成分股失败")
+            return None
+
+        df = result['df']
+        stocks = df[['成分券代码', '成分券名称']].copy()
+        stocks.columns = ['code', 'name']
+        stocks = stocks.drop_duplicates(subset='code', keep='first')
+        stocks = stocks.reset_index(drop=True)
+
+        print(f"  ✓ 成功获取 {len(stocks)} 只中证500成分股")
+
+        if Config.STOCK_LIMIT is not None and len(stocks) > Config.STOCK_LIMIT:
+            stocks = stocks.head(Config.STOCK_LIMIT)
+            print(f"  ⚠ 已限制为前 {Config.STOCK_LIMIT} 只股票（测试模式）")
+
+        return stocks
 
     return None
 
