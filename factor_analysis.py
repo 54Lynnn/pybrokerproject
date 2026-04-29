@@ -71,16 +71,17 @@ def evaluate_factors(df, horizons=(1, 5, 10)):
             sign = '+' if mean_ic > 0 else ''
             print(f"     forward {h:>2}d    |  {sign}{mean_ic:>6.4f} | {med_ic:>7.4f} | {ir:>6.3f} | {pos_pct:>5.1f}%")
 
-    # ===== 2. 各因子 IC =====
+    # ===== 2. 各因子 IC + IR =====
     # 自动发现所有 f_ 前缀的因子列
     f_cols = sorted([c for c in df.columns if c.startswith('f_')])
     f_labels = [c.replace('f_', '').replace('momentum', 'mom').replace('volume', 'vol').
                 replace('_score', '').replace('_ratio', '') for c in f_cols]
     print(f"\n  [2] 各因子 IC（forward 5d）")
-    print(f"       因子    |   均值  |  正>0比例")
-    print(f"  " + "-" * 40)
+    print(f"       因子    |   均值  |  IR   |  正>0比例 | 建议权重")
+    print(f"  " + "-" * 60)
 
     df_fwd5 = compute_forward_return(df, 5)
+    factor_ir = {}
     for col, label in zip(f_cols, f_labels):
         if col in df.columns:
             daily_ics = []
@@ -91,16 +92,29 @@ def evaluate_factors(df, horizons=(1, 5, 10)):
             if daily_ics:
                 ics = pd.Series(daily_ics)
                 mean_ic = ics.mean()
+                ir = mean_ic / ics.std() if ics.std() > 0 else 0
                 pos_pct = (ics > 0).mean() * 100
                 sign = '+' if mean_ic > 0 else ''
-                print(f"     {label:<6s}   |  {sign}{mean_ic:>6.4f} | {pos_pct:>5.1f}%")
+                factor_ir[label] = max(0, ir)  # 只保留正IR
+                print(f"     {label:<6s}   |  {sign}{mean_ic:>6.4f} | {ir:>6.3f} | {pos_pct:>5.1f}%")
+
+    # 根据IR计算建议权重
+    total_ir = sum(factor_ir.values())
+    if total_ir > 0:
+        print(f"\n  [2.1] 基于IR的权重建议（IR加权）")
+        print(f"       因子    |  IR   | 建议权重")
+        print(f"  " + "-" * 35)
+        for label, ir in sorted(factor_ir.items(), key=lambda x: x[1], reverse=True):
+            weight = ir / total_ir
+            print(f"     {label:<6s}   | {ir:>6.3f} | {weight:>7.1%}")
 
     # ===== 3. 分位数收益 =====
     print(f"\n  [3] 分位数组合收益（Compositive Score 排名, forward 5d）")
-    print(f"       分组    |  日均收益 |  累计收益")
+    print(f"       分组    |  日均收益 |  年化收益")
     print(f"  " + "-" * 45)
 
     df_fwd5 = compute_forward_return(df, 5)
+
     for q in range(1, 11):
         lo_pct = (q - 1) * 10
         hi_pct = q * 10
@@ -115,9 +129,10 @@ def evaluate_factors(df, horizons=(1, 5, 10)):
         if returns:
             rets = pd.Series(returns)
             daily = rets.mean()
-            cum = (1 + rets).prod() - 1
+            # 年化收益 = (1 + 日均收益)^252 - 1
+            annual = (1 + daily) ** 252 - 1
             marker = ' ◀ Q1' if q == 1 else (' ◀ Q10' if q == 10 else '')
-            print(f"     Q{q:>2} ({lo_pct:>2}%-{hi_pct:>2}%) |  {daily:>+7.4f} | {cum:>+9.2%}{marker}")
+            print(f"     Q{q:>2} ({lo_pct:>2}%-{hi_pct:>2}%) |  {daily:>+7.4f} | {annual:>+9.2%}{marker}")
 
     # ===== 4. 因子衰减 =====
     print(f"\n  [4] 综合得分自相关衰减（信号持续性）")

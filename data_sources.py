@@ -66,6 +66,76 @@ def get_zz500_stocks():
     return None
 
 
+def get_stock_industry(stocks_df):
+    """
+    获取股票所属行业信息（使用akshare的stock_board_industry_ths接口）。
+
+    返回：{code: industry_name} 字典
+    """
+    print("\n[数据] 正在获取股票行业信息...")
+
+    industry_map = {}
+    max_retries = 3
+
+    for attempt in range(max_retries):
+        result = {}
+        t = threading.Thread(target=lambda: result.update(
+            {'df': ak.stock_board_industry_name_ths()}
+        ), daemon=True)
+        t.start()
+        t.join(timeout=60)
+
+        if t.is_alive() or 'df' not in result:
+            if attempt < max_retries - 1:
+                wait = (attempt + 1) * 5
+                print(f"  ⚠ 行业数据获取超时（{attempt+1}/{max_retries}），{wait}秒后重试...")
+                time.sleep(wait)
+                continue
+            print(f"  ⚠ 无法获取行业数据，将跳过行业中性化")
+            return {}
+
+        industry_df = result['df']
+        break
+
+    try:
+        # stock_board_industry_name_ths 返回的列可能是 'name', 'code' 或 '板块名称', '板块代码'
+        # 我们需要获取每个行业的成分股
+        name_col = 'name' if 'name' in industry_df.columns else '板块名称'
+        if name_col in industry_df.columns:
+            industry_names = industry_df[name_col].tolist()
+            print(f"  发现 {len(industry_names)} 个行业板块，正在获取成分股...")
+
+            for ind_name in industry_names:
+                try:
+                    cons_df = ak.stock_board_industry_cons_ths(symbol=ind_name)
+                    if cons_df is not None and not cons_df.empty:
+                        # 列名可能是 '代码' 或 '个股代码' 或 'name'
+                        code_col = None
+                        for col in ['代码', '个股代码', 'code']:
+                            if col in cons_df.columns:
+                                code_col = col
+                                break
+                        if code_col:
+                            for _, row in cons_df.iterrows():
+                                code = str(row[code_col]).zfill(6)
+                                industry_map[code] = ind_name
+                except Exception:
+                    continue
+        else:
+            print(f"  ⚠ 行业数据格式不符合预期，列名: {list(industry_df.columns)}")
+            return {}
+    except Exception as e:
+        print(f"  ⚠ 行业数据解析失败: {e}")
+        return {}
+
+    # 只保留我们需要的股票
+    valid_codes = set(stocks_df['code'].tolist())
+    industry_map = {k: v for k, v in industry_map.items() if k in valid_codes}
+
+    print(f"  ✓ 行业数据获取完成：{len(industry_map)} 只股票")
+    return industry_map
+
+
 # ============================================================
 # 模块4：数据获取与 SQLite 缓存（baostock）
 # ============================================================

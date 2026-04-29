@@ -59,6 +59,10 @@ def execute_strategy(ctx: ExecContext):
       - 如果持仓且不在 top_symbols 中 → 全部卖出
       - 如果无持仓且在 top_symbols 中 → 按目标仓位买入
 
+    新增止损机制：
+      - 个股止损：-8%
+      - 动态止盈：盈利20%后回撤10%卖出
+
     关键 API（来自官方文档）：
       - ctx.long_pos() → Position 或 None
       - ctx.close[-1]  → 最新收盘价
@@ -72,8 +76,54 @@ def execute_strategy(ctx: ExecContext):
 
     pos = ctx.long_pos()
 
-    # 情况1：有持仓 → 排名在 SELL_THRESHOLD 以内则保留，否则清仓
+    # 情况1：有持仓 → 检查止损/止盈条件
     if pos:
+        # 计算当前盈亏比例（使用持仓平均成本）
+        current_price = ctx.close[-1]
+
+        # 从 pos.entries 计算加权平均入场价格
+        entry_price = 0.0
+        total_shares = 0
+        for entry in pos.entries:
+            entry_price += float(entry.price) * float(entry.shares)
+            total_shares += float(entry.shares)
+        if total_shares > 0:
+            entry_price = entry_price / total_shares
+
+        if entry_price > 0:
+            pnl_pct = (current_price - entry_price) / entry_price
+
+            # 止损：亏损超过8%
+            if pnl_pct < -0.08:
+                ctx.sell_all_shares()
+                return
+
+            # 动态止盈：盈利超过20%后，回撤10%卖出
+            if pnl_pct > 0.20:
+                # 使用pybroker的param记录每只股票的最高价
+                # 注意：param是全局的，必须用股票代码作为key前缀隔离
+                highest_price_key = f'highest_price_{ctx.symbol}'
+                highest_price = pyb.param(highest_price_key)
+                
+                # 首次触发止盈跟踪：初始化最高价为当前价（而非entry_price）
+                # 因为entry_price到current_price之间可能已经涨了很多
+                if highest_price is None:
+                    highest_price = current_price
+                    pyb.param(highest_price_key, highest_price)
+                
+                # 更新最高价
+                if current_price > highest_price:
+                    highest_price = current_price
+                    pyb.param(highest_price_key, highest_price)
+                
+                # 从最高点回撤10%触发止盈
+                if current_price < highest_price * 0.90:
+                    ctx.sell_all_shares()
+                    # 清仓后清除该股票的最高价记录，避免内存泄漏
+                    pyb.param(highest_price_key, None)
+                    return
+
+        # 轮动卖出：排名在 SELL_THRESHOLD 以外则清仓
         if ctx.symbol not in keep_symbols:
             ctx.sell_all_shares()
         return
@@ -84,7 +134,7 @@ def execute_strategy(ctx: ExecContext):
         if ctx.bars >= 20 and ctx.close[-1] >= np.mean(ctx.close[-20:]):
             ctx.buy_shares = ctx.calc_target_shares(target_size)
             ctx.buy_limit_price = ctx.close[-1]
-            ctx.hold_bars = Config.MIN_HOLD_BARS  # 强制持有至少 5 天
+            ctx.hold_bars = Config.MIN_HOLD_BARS  # 强制持有至少 N 天
 
 
 # ============================================================

@@ -1,0 +1,16 @@
+{
+  "backtest_time": "20260429_073438",
+  "backtest_start": "2023-01-01",
+  "backtest_end": "2025-12-31",
+  "initial_cash": 1000000,
+  "top_n_stocks": 10,
+  "trade_count": 535,
+  "total_return_pct": -14.645354,
+  "max_drawdown_pct": -26.566189549516373,
+  "sharpe": -0.05721905375799858,
+  "sortino": -0.0699228472686296,
+  "profit_factor": 0.8280543164992374,
+  "win_rate": 46.49805447470817,
+  "total_pnl": -146453.54,
+  "total_fees": 72959.46
+}

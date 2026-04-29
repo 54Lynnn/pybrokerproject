@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""回测执行、结果展示、可视化"""
+"""回测执行、结果展示、可视化、结果持久化"""
 
 from config import Config
 from factors import build_daily_selections
@@ -13,6 +13,10 @@ import numpy as np
 import os
 import pandas as pd
 import pybroker as pyb
+import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 def run_backtest(df):
     """
@@ -25,19 +29,19 @@ def run_backtest(df):
       4. strategy.backtest(warmup=20) → 执行回测
     """
 
-    print(f"\n{'=' * 60}")
-    print(f"  开始 pybroker 回测")
-    print(f"  初始资金: {Config.INITIAL_CASH:,.0f} 元")
-    print(f"  回测区间: {Config.BACKTEST_START} ~ {Config.BACKTEST_END}")
-    print(f"  持仓上限: {Config.TOP_N_STOCKS} 只")
-    print(f"{'=' * 60}")
+    logger.info("=" * 60)
+    logger.info("开始 pybroker 回测")
+    logger.info(f"初始资金: {Config.INITIAL_CASH:,.0f} 元")
+    logger.info(f"回测区间: {Config.BACKTEST_START} ~ {Config.BACKTEST_END}")
+    logger.info(f"持仓上限: {Config.TOP_N_STOCKS} 只")
+    logger.info("=" * 60)
 
     # ---- 构建每日选股映射表 ----
-    print(f"\n  构建选股信号...")
+    logger.info("构建选股信号...")
     factors.SELECTION_MAP = build_daily_selections(df)
 
     if not factors.SELECTION_MAP:
-        print("  ✗ 选股信号为空！")
+        logger.error("选股信号为空！")
         return None
 
     # 初始化全局参数默认值
@@ -63,10 +67,10 @@ def run_backtest(df):
     df_bt = df_bt.sort_values(['symbol', 'date']).reset_index(drop=True)
 
     if df_bt.empty:
-        print("  ✗ 回测数据为空！")
+        logger.error("回测数据为空！")
         return None
 
-    print(f"  回测数据: {df_bt['symbol'].nunique()} 只股票, {len(df_bt)} 条记录")
+    logger.info(f"回测数据: {df_bt['symbol'].nunique()} 只股票, {len(df_bt)} 条记录")
 
     symbols = df_bt['symbol'].unique().tolist()
 
@@ -95,17 +99,17 @@ def run_backtest(df):
     )
 
     # ---- 执行回测 ----
-    print(f"\n  正在执行回测，请稍候...")
+    logger.info("正在执行回测，请稍候...")
     result = strategy.backtest(
         warmup=20,
         disable_parallel=False,
     )
 
-    print(f"  ✓ 回测完成！")
+    logger.info("回测完成！")
     return result
 
 
-def display_results(result):
+def display_results(result, df):
     """
     打印回测结果的核心指标。
 
@@ -114,9 +118,11 @@ def display_results(result):
       - 总收益率、最大回撤
       - 夏普比率、索提诺比率
       - 盈亏比（Profit Factor）
+      - 基准收益率、超额收益率
 
     Args:
         result: pybroker.TestResult 对象
+        df: 包含回测数据的 DataFrame（用于计算基准收益）
     """
     if result is None:
         print("  ✗ 无回测结果可展示")
@@ -129,8 +135,126 @@ def display_results(result):
     # 使用 result.metrics (EvalMetrics dataclass) 直接取字段
     m = result.metrics
 
+    # ---- 计算基准数据（中证500指数） ----
+    benchmark_data = {}
+    try:
+        import baostock as bs
+        import sqlite3
+
+        # 从SQLite数据库查询中证500指数(000905)数据
+        db_path = Config.SQLITE_DB_PATH
+        conn = sqlite3.connect(db_path)
+
+        # 中证500指数代码在baostock中是 sh.000905
+        index_code = 'sh.000905'
+
+        # 查询指数数据（使用close价格计算收益率，因为pctChg可能为空）
+        query = """
+            SELECT date, close FROM daily_kline
+            WHERE code = ? AND date >= ? AND date <= ?
+            ORDER BY date
+        """
+
+        # 使用回测的设定日期范围（确保与回测区间一致）
+        bt_start = Config.BACKTEST_START
+        bt_end = Config.BACKTEST_END
+
+        index_df = pd.read_sql_query(query, conn, params=(index_code, bt_start, bt_end))
+        conn.close()
+
+        if not index_df.empty and index_df['close'].notna().sum() > 0:
+            # 用close价格计算日收益率
+            index_df['close'] = pd.to_numeric(index_df['close'], errors='coerce')
+            index_df = index_df.dropna(subset=['close'])
+            daily_returns = index_df['close'].pct_change().dropna()
+            log_returns = np.log1p(daily_returns)
+            benchmark_return = np.expm1(log_returns.sum())
+            benchmark_return_pct = benchmark_return * 100
+
+            # 计算基准的最大回撤、夏普比率、索提诺比率
+            benchmark_cum = (1 + daily_returns).cumprod()
+            benchmark_peak = benchmark_cum.expanding().max()
+            benchmark_drawdown = (benchmark_cum - benchmark_peak) / benchmark_peak
+            benchmark_max_dd = benchmark_drawdown.min() * 100
+
+            # 计算基准的夏普比率（假设无风险利率为3%）
+            risk_free_rate = 0.03
+            excess_daily = daily_returns - risk_free_rate / 252
+            benchmark_sharpe = (excess_daily.mean() / excess_daily.std()) * np.sqrt(252) if excess_daily.std() != 0 else 0
+
+            # 计算基准的索提诺比率
+            downside = excess_daily[excess_daily < 0]
+            benchmark_sortino = (excess_daily.mean() / downside.std()) * np.sqrt(252) if len(downside) > 0 and downside.std() != 0 else 0
+
+            benchmark_data = {
+                'return': benchmark_return_pct,
+                'max_dd': benchmark_max_dd,
+                'sharpe': benchmark_sharpe,
+                'sortino': benchmark_sortino
+            }
+        else:
+            # 如果数据库中没有指数数据，尝试实时获取
+            print("  ⚠ 数据库中无中证500指数数据，尝试从baostock获取...")
+            lg = bs.login()
+            if lg.error_code == '0':
+                rs = bs.query_history_k_data_plus(
+                    index_code,
+                    'date,close',
+                    start_date=bt_start,
+                    end_date=bt_end,
+                    frequency='d',
+                    adjustflag='3'
+                )
+                data_list = []
+                while rs.error_code == '0' and rs.next():
+                    data_list.append(rs.get_row_data())
+                bs.logout()
+
+                if data_list:
+                    index_df = pd.DataFrame(data_list, columns=rs.fields)
+                    index_df['close'] = pd.to_numeric(index_df['close'], errors='coerce')
+                    index_df = index_df.dropna(subset=['close'])
+                    daily_returns = index_df['close'].pct_change().dropna()
+                    log_returns = np.log1p(daily_returns)
+                    benchmark_return = np.expm1(log_returns.sum())
+                    benchmark_return_pct = benchmark_return * 100
+
+                    # 计算基准指标
+                    benchmark_cum = (1 + daily_returns).cumprod()
+                    benchmark_peak = benchmark_cum.expanding().max()
+                    benchmark_drawdown = (benchmark_cum - benchmark_peak) / benchmark_peak
+                    benchmark_max_dd = benchmark_drawdown.min() * 100
+
+                    risk_free_rate = 0.03
+                    excess_daily = daily_returns - risk_free_rate / 252
+                    benchmark_sharpe = (excess_daily.mean() / excess_daily.std()) * np.sqrt(252) if excess_daily.std() != 0 else 0
+
+                    downside = excess_daily[excess_daily < 0]
+                    benchmark_sortino = (excess_daily.mean() / downside.std()) * np.sqrt(252) if len(downside) > 0 and downside.std() != 0 else 0
+
+                    benchmark_data = {
+                        'return': benchmark_return_pct,
+                        'max_dd': benchmark_max_dd,
+                        'sharpe': benchmark_sharpe,
+                        'sortino': benchmark_sortino
+                    }
+                else:
+                    benchmark_data = {'return': 0.0, 'max_dd': 0.0, 'sharpe': 0.0, 'sortino': 0.0}
+            else:
+                benchmark_data = {'return': 0.0, 'max_dd': 0.0, 'sharpe': 0.0, 'sortino': 0.0}
+    except Exception as e:
+        print(f"  ⚠ 基准数据计算失败: {e}")
+        benchmark_data = {'return': 0.0, 'max_dd': 0.0, 'sharpe': 0.0, 'sortino': 0.0}
+
+    # 计算超额收益率
+    excess_return_pct = m.total_return_pct - benchmark_data.get('return', 0)
+
+    # ---- 策略表现框 ----
+    print(f"\n  【策略表现】")
+    print(f"  {'-' * 40}")
     print(f"  {'交易总次数':<14}: {int(m.trade_count):>10}")
     print(f"  {'总收益率':<14}: {m.total_return_pct:>10.2f}%")
+    print(f"  {'超额收益率':<14}: {excess_return_pct:>10.2f}%")
     print(f"  {'最大回撤':<14}: {m.max_drawdown_pct:>10.2f}%")
     print(f"  {'夏普比率':<14}: {m.sharpe:>10.4f}")
     print(f"  {'索提诺比率':<14}: {m.sortino:>10.4f}")
@@ -142,20 +266,113 @@ def display_results(result):
         print(f"  {'初始市值':<14}: {m.initial_market_value:>12,.2f} 元")
         print(f"  {'最终市值':<14}: {m.end_market_value:>12,.2f} 元")
 
+    # ---- 基准表现框 ----
+    print(f"\n  【基准表现 - 中证500指数】")
+    print(f"  {'-' * 40}")
+    print(f"  {'基准收益率':<14}: {benchmark_data.get('return', 0):>10.2f}%")
+    print(f"  {'最大回撤':<14}: {benchmark_data.get('max_dd', 0):>10.2f}%")
+    print(f"  {'夏普比率':<14}: {benchmark_data.get('sharpe', 0):>10.4f}")
+    print(f"  {'索提诺比率':<14}: {benchmark_data.get('sortino', 0):>10.4f}")
+
     # 显示交易记录汇总
     orders = result.orders
     if orders is not None and not orders.empty:
         buy_orders = orders[orders['type'] == 'buy']
         sell_orders = orders[orders['type'] == 'sell']
-        print(f"\n  交易记录统计:")
-        print(f"    买入次数: {len(buy_orders)}")
-        print(f"    卖出次数: {len(sell_orders)}")
+        logger.info("交易记录统计:")
+        logger.info(f"买入次数: {len(buy_orders)}")
+        logger.info(f"卖出次数: {len(sell_orders)}")
     else:
-        print(f"\n  ⚠ 未产生任何交易")
+        logger.warning("未产生任何交易")
 
 
 # ============================================================
-# 模块8：可视化分析
+# 模块8：结果持久化
+# ============================================================
+
+def save_results(result, df, output_dir=None):
+    """
+    将回测结果持久化保存到文件。
+    
+    保存内容：
+      1. 回测指标摘要 (JSON)
+      2. 交易记录 (CSV)
+      3. 每日持仓市值 (CSV)
+      4. 每日选股列表 (CSV)
+    
+    参数:
+        result: pybroker.TestResult 对象
+        df: 包含回测数据的 DataFrame
+        output_dir: 输出目录，默认在项目根目录的results文件夹
+    """
+    if result is None:
+        logger.error("无回测结果可保存")
+        return
+    
+    if output_dir is None:
+        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    try:
+        # 1. 保存回测指标摘要
+        m = result.metrics
+        summary = {
+            'backtest_time': timestamp,
+            'backtest_start': Config.BACKTEST_START,
+            'backtest_end': Config.BACKTEST_END,
+            'initial_cash': Config.INITIAL_CASH,
+            'top_n_stocks': Config.TOP_N_STOCKS,
+            'trade_count': int(m.trade_count),
+            'total_return_pct': float(m.total_return_pct),
+            'max_drawdown_pct': float(m.max_drawdown_pct),
+            'sharpe': float(m.sharpe),
+            'sortino': float(m.sortino),
+            'profit_factor': float(m.profit_factor),
+            'win_rate': float(m.win_rate),
+            'total_pnl': float(m.total_pnl),
+            'total_fees': float(m.total_fees),
+        }
+        
+        summary_path = os.path.join(output_dir, f'summary_{timestamp}.json')
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        logger.info(f"回测摘要已保存: {summary_path}")
+        
+        # 2. 保存交易记录
+        if result.orders is not None and not result.orders.empty:
+            orders_path = os.path.join(output_dir, f'orders_{timestamp}.csv')
+            result.orders.to_csv(orders_path, index=False, encoding='utf-8-sig')
+            logger.info(f"交易记录已保存: {orders_path}")
+        
+        # 3. 保存每日持仓市值
+        if result.portfolio is not None and not result.portfolio.empty:
+            portfolio_path = os.path.join(output_dir, f'portfolio_{timestamp}.csv')
+            portfolio_df = result.portfolio.reset_index()
+            portfolio_df.to_csv(portfolio_path, index=False, encoding='utf-8-sig')
+            logger.info(f"持仓市值已保存: {portfolio_path}")
+        
+        # 4. 保存每日选股列表
+        if hasattr(factors, 'SELECTION_MAP') and factors.SELECTION_MAP:
+            selections = []
+            for date, symbols in factors.SELECTION_MAP.items():
+                for sym in symbols:
+                    selections.append({'date': date, 'symbol': sym})
+            if selections:
+                selections_df = pd.DataFrame(selections)
+                selections_path = os.path.join(output_dir, f'selections_{timestamp}.csv')
+                selections_df.to_csv(selections_path, index=False, encoding='utf-8-sig')
+                logger.info(f"选股列表已保存: {selections_path}")
+        
+        logger.info(f"所有结果已保存到: {output_dir}")
+        
+    except Exception as e:
+        logger.error(f"保存结果失败: {e}")
+
+
+# ============================================================
+# 模块9：可视化分析
 # ============================================================
 
 def plot_results(result, df):

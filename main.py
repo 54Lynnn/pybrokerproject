@@ -66,11 +66,16 @@ warnings.filterwarnings('ignore')
 pyb.enable_data_source_cache('akshare')
 pyb.enable_data_source_cache('custom')
 
-print("=" * 60)
-print("  量化多因子选股策略 启动")
-print(f"  pybroker 版本: {pyb.__version__}")
-print(f"  启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-print("=" * 60)
+# 初始化日志系统
+import logging
+from logger_config import setup_logger
+logger = setup_logger('strategy', level=logging.INFO)
+
+logger.info("=" * 60)
+logger.info("  量化多因子选股策略 启动")
+logger.info(f"  pybroker 版本: {pyb.__version__}")
+logger.info(f"  启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+logger.info("=" * 60)
 
 
 # ============================================================
@@ -78,12 +83,13 @@ print("=" * 60)
 # ============================================================
 
 from config import Config
-from data_sources import get_zz500_stocks, download_all_stocks_data, load_kline_from_sqlite
+from data_sources import get_zz500_stocks, download_all_stocks_data, load_kline_from_sqlite, get_stock_industry
 from indicators import compute_all_indicators
 from factors import compute_factor_scores
 from factor_analysis import evaluate_factors
 from strategy import a_share_fee
-from backtest import run_backtest, display_results, plot_results
+from backtest import run_backtest, display_results, plot_results, save_results
+from data_validation import validate_ohlcv, clean_data, validate_factors
 
 def parse_args():
     """
@@ -96,6 +102,7 @@ def parse_args():
       python 量化多因子选股策略.py
       python 量化多因子选股策略.py --start 2023-01-01 --end 2025-12-31
       python 量化多因子选股策略.py --stocks 30 --top-n 10 --cash 500000
+      python 量化多因子选股策略.py --start 2023-01-01 --end 2025-12-31 --use-rolling-ml
     """
     default_backtest_end = Config.BACKTEST_END
     default_backtest_start = pd.Timestamp(default_backtest_end) - timedelta(days=365 * 2)
@@ -109,6 +116,7 @@ def parse_args():
   python 量化多因子选股策略.py
   python 量化多因子选股策略.py --start 2023-01-01 --end 2025-12-31
   python 量化多因子选股策略.py --stocks 30 --top-n 10 --cash 500000
+  python 量化多因子选股策略.py --start 2023-01-01 --end 2025-12-31 --use-rolling-ml
         """
     )
     p.add_argument('--start', type=str, default=default_backtest_start,
@@ -121,6 +129,12 @@ def parse_args():
                    help=f'每日持仓数 (默认: {Config.TOP_N_STOCKS})')
     p.add_argument('--cash', type=int, default=Config.INITIAL_CASH,
                    help=f'初始资金/元 (默认: {Config.INITIAL_CASH})')
+    p.add_argument('--use-rolling-ic', action='store_true',
+                   help='启用滚动IC加权（无未来函数，推荐）')
+    p.add_argument('--use-rolling-ml', action='store_true',
+                   help='启用滚动XGBoost机器学习（无未来函数）')
+    p.add_argument('--no-ml', action='store_true',
+                   help='禁用ML，使用纯线性加权')
     return p.parse_args()
 
 
@@ -150,6 +164,8 @@ def main():
     Config.STOCK_LIMIT = None if args.stocks == 0 else args.stocks
     Config.TOP_N_STOCKS = args.top_n
     Config.INITIAL_CASH = args.cash
+    use_rolling_ic = args.use_rolling_ic and not args.no_ml
+    use_rolling_ml = args.use_rolling_ml and not args.no_ml and not args.use_rolling_ic
 
     # 验证日期格式
     for date_str, name in [
@@ -161,70 +177,168 @@ def main():
         try:
             pd.Timestamp(date_str)
         except Exception:
-            print(f"  ✗ {name}日期格式错误: {date_str}")
+            logger.error(f"{name}日期格式错误: {date_str}")
             return
 
-    print(f"\n  回测区间: {Config.BACKTEST_START} ~ {Config.BACKTEST_END}")
-    print(f"  数据区间: {Config.DATA_START_DATE} ~ {Config.DATA_END_DATE}")
-    print(f"  (数据比回测早 {Config.DATA_LEAD_DAYS} 天，用于指标预热)")
+    logger.info(f"回测区间: {Config.BACKTEST_START} ~ {Config.BACKTEST_END}")
+    logger.info(f"数据区间: {Config.DATA_START_DATE} ~ {Config.DATA_END_DATE}")
+    logger.info(f"(数据比回测早 {Config.DATA_LEAD_DAYS} 天，用于指标预热)")
 
-    print(f"\n{'=' * 60}")
-    print(f"  步骤1: 获取中证500成分股列表")
-    print(f"{'=' * 60}")
+    logger.info("=" * 60)
+    logger.info("步骤1: 获取中证500成分股列表")
+    logger.info("=" * 60)
     stocks_df = get_zz500_stocks()
 
     if stocks_df is None or stocks_df.empty:
-        print("\n  ✗ 无法获取成分股列表，回测终止")
-        print("  提示：akshare 可能暂时不可用，稍后重试或检查网络连接")
+        logger.error("无法获取成分股列表，回测终止")
+        logger.error("提示：akshare 可能暂时不可用，稍后重试或检查网络连接")
         return
 
-    print(f"\n{'=' * 60}")
-    print(f"  步骤2: 下载/加载日K线数据")
-    print(f"{'=' * 60}")
+    logger.info("=" * 60)
+    logger.info("步骤2: 下载/加载日K线数据")
+    logger.info("=" * 60)
     # 先尝试下载数据（如有缓存则自动跳过）
     download_all_stocks_data(stocks_df)
     # 从 SQLite 加载数据到 DataFrame
     df = load_kline_from_sqlite(stocks_df)
 
     if df.empty:
-        print("  ✗ 没有数据可供回测，程序退出")
+        logger.error("没有数据可供回测，程序退出")
         return
 
-    print(f"\n{'=' * 60}")
-    print(f"  步骤3: 计算技术指标")
-    print(f"{'=' * 60}")
+    # 数据校验与清洗
+    logger.info("=" * 60)
+    logger.info("步骤2.5: 数据校验与清洗")
+    logger.info("=" * 60)
+    try:
+        validate_ohlcv(df, strict=False)
+        df = clean_data(df)
+    except Exception as e:
+        logger.error(f"数据校验失败: {e}")
+        return
+
+    logger.info("=" * 60)
+    logger.info("步骤3: 计算技术指标")
+    logger.info("=" * 60)
     df = compute_all_indicators(df)
 
-    print(f"\n{'=' * 60}")
-    print(f"  步骤4: 多因子打分与选股")
-    print(f"{'=' * 60}")
-    df = compute_factor_scores(df)
+    # ---- 获取行业信息并合并 ----
+    logger.info("=" * 60)
+    logger.info("步骤3.5: 获取行业信息")
+    logger.info("=" * 60)
+    industry_map = get_stock_industry(stocks_df)
+    if industry_map:
+        df['industry'] = df['symbol'].map(
+            lambda x: industry_map.get(x.replace('sh.', '').replace('sz.', '').replace('bj.', ''), '未知')
+        )
+        logger.info("行业信息已合并到数据")
+    else:
+        logger.warning("未获取到行业信息，跳过行业中性化")
 
-    print(f"\n{'=' * 60}")
-    print(f"  步骤4.5: 因子评估")
-    print(f"{'=' * 60}")
+    logger.info("=" * 60)
+    logger.info("步骤4: 多因子打分与选股")
+    logger.info("=" * 60)
+
+    # ---- 加载中证500指数数据用于市场状态判断 ----
+    logger.info("[动态权重] 加载中证500指数数据用于市场状态判断...")
+    df_index = pd.DataFrame()
+    try:
+        import sqlite3
+        db_path = Config.SQLITE_DB_PATH
+        conn = sqlite3.connect(db_path)
+        # 中证500指数代码在baostock中是 sh.000905
+        index_code = 'sh.000905'
+        query = """
+            SELECT date, open, high, low, close, volume
+            FROM daily_kline
+            WHERE code = ? AND date >= ? AND date <= ?
+            ORDER BY date
+        """
+        df_index = pd.read_sql_query(query, conn,
+                                     params=(index_code, Config.DATA_START_DATE, Config.DATA_END_DATE))
+        conn.close()
+
+        if not df_index.empty:
+            df_index['date'] = pd.to_datetime(df_index['date'])
+            df_index['open'] = pd.to_numeric(df_index['open'], errors='coerce')
+            df_index['high'] = pd.to_numeric(df_index['high'], errors='coerce')
+            df_index['low'] = pd.to_numeric(df_index['low'], errors='coerce')
+            df_index['close'] = pd.to_numeric(df_index['close'], errors='coerce')
+            df_index['volume'] = pd.to_numeric(df_index['volume'], errors='coerce')
+            logger.info(f"指数数据加载完成：{len(df_index)} 条记录")
+        else:
+            logger.warning("数据库中无中证500指数数据，尝试从baostock下载...")
+            import baostock as bs
+            lg = bs.login()
+            if lg.error_code == '0':
+                rs = bs.query_history_k_data_plus(
+                    index_code,
+                    'date,open,high,low,close,volume',
+                    start_date=Config.DATA_START_DATE,
+                    end_date=Config.DATA_END_DATE,
+                    frequency='d',
+                    adjustflag='3'
+                )
+                data_list = []
+                while rs.error_code == '0' and rs.next():
+                    data_list.append(rs.get_row_data())
+                bs.logout()
+
+                if data_list:
+                    df_index = pd.DataFrame(data_list, columns=rs.fields)
+                    df_index['date'] = pd.to_datetime(df_index['date'])
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        df_index[col] = pd.to_numeric(df_index[col], errors='coerce')
+                    # 保存到数据库
+                    df_index['code'] = index_code
+                    with sqlite3.connect(db_path) as conn:
+                        existing = conn.execute("SELECT date FROM daily_kline WHERE code = ?",
+                                               (index_code,)).fetchall()
+                        existing_dates = {row[0] for row in existing} if existing else set()
+                        new_rows = df_index[~df_index['date'].isin(existing_dates)]
+                        if not new_rows.empty:
+                            new_rows.to_sql('daily_kline', conn, if_exists='append', index=False)
+                    logger.info(f"指数数据下载完成：{len(df_index)} 条记录")
+                else:
+                    logger.error("无法获取指数数据，将使用固定权重")
+            else:
+                logger.error("baostock登录失败，将使用固定权重")
+    except Exception as e:
+        logger.warning(f"指数数据加载失败: {e}，将使用固定权重")
+        df_index = pd.DataFrame()
+
+    df = compute_factor_scores(df, df_index, use_rolling_ml=use_rolling_ml, use_rolling_ic=use_rolling_ic)
+
+    logger.info("=" * 60)
+    logger.info("步骤4.5: 因子评估")
+    logger.info("=" * 60)
     evaluate_factors(df)
 
-    print(f"\n{'=' * 60}")
-    print(f"  步骤5: 执行回测")
-    print(f"{'=' * 60}")
+    logger.info("=" * 60)
+    logger.info("步骤5: 执行回测")
+    logger.info("=" * 60)
     result = run_backtest(df)
 
-    print(f"\n{'=' * 60}")
-    print(f"  步骤6: 展示结果")
-    print(f"{'=' * 60}")
-    display_results(result)
+    logger.info("=" * 60)
+    logger.info("步骤6: 展示结果")
+    logger.info("=" * 60)
+    display_results(result, df)
 
-    print(f"\n{'=' * 60}")
-    print(f"  步骤7: 可视化图表")
-    print(f"{'=' * 60}")
+    logger.info("=" * 60)
+    logger.info("步骤7: 可视化图表")
+    logger.info("=" * 60)
     plot_results(result, df)
 
-    print(f"\n{'=' * 60}")
-    print(f"  策略运行完毕！")
-    print(f"  数据库文件: {Config.SQLITE_DB_PATH}")
-    print(f"  图表目录: {os.path.join(os.path.dirname(os.path.abspath(__file__)), '图表')}")
-    print(f"{'=' * 60}")
+    logger.info("=" * 60)
+    logger.info("步骤8: 保存回测结果")
+    logger.info("=" * 60)
+    save_results(result, df)
+
+    logger.info("=" * 60)
+    logger.info("策略运行完毕！")
+    logger.info(f"数据库文件: {Config.SQLITE_DB_PATH}")
+    logger.info(f"图表目录: {os.path.join(os.path.dirname(os.path.abspath(__file__)), '图表')}")
+    logger.info("=" * 60)
 
 
 if __name__ == '__main__':
