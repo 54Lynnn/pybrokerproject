@@ -83,7 +83,8 @@ logger.info("=" * 60)
 # ============================================================
 
 from config import Config
-from data_sources import get_zz500_stocks, download_all_stocks_data, load_kline_from_sqlite, get_stock_industry
+from data_sources import get_multi_index_stocks, download_all_stocks_data, load_kline_from_sqlite
+# from data_sources import get_stock_industry  # 暂时注释，待实现行业中性化
 from indicators import compute_all_indicators
 from factors import compute_factor_scores
 from factor_analysis import evaluate_factors
@@ -117,6 +118,10 @@ def parse_args():
   python 量化多因子选股策略.py --start 2023-01-01 --end 2025-12-31
   python 量化多因子选股策略.py --stocks 30 --top-n 10 --cash 500000
   python 量化多因子选股策略.py --start 2023-01-01 --end 2025-12-31 --use-rolling-ml
+
+  快速测试模式:
+    python main.py --quick-test   # 使用100只股票，1年数据，纯线性加权
+    python main.py --fast         # 跳过滚动IC/ML，使用简单线性加权
         """
     )
     p.add_argument('--start', type=str, default=default_backtest_start,
@@ -124,7 +129,7 @@ def parse_args():
     p.add_argument('--end', type=str, default=default_backtest_end,
                    help=f'回测结束日期 (默认: {default_backtest_end})')
     p.add_argument('--stocks', type=int, default=0,
-                   help='股票数量上限 (0=全部500只, 默认: 0)')
+                   help='股票数量上限 (0=全部约1800只, 默认: 0)')
     p.add_argument('--top-n', type=int, default=Config.TOP_N_STOCKS,
                    help=f'每日持仓数 (默认: {Config.TOP_N_STOCKS})')
     p.add_argument('--cash', type=int, default=Config.INITIAL_CASH,
@@ -135,6 +140,10 @@ def parse_args():
                    help='启用滚动XGBoost机器学习（无未来函数）')
     p.add_argument('--no-ml', action='store_true',
                    help='禁用ML，使用纯线性加权')
+    p.add_argument('--fast', action='store_true',
+                   help='快速模式：跳过滚动IC/ML，使用简单线性加权')
+    p.add_argument('--quick-test', action='store_true',
+                   help='快速测试：使用100只股票，1年数据，纯线性加权')
     return p.parse_args()
 
 
@@ -151,6 +160,14 @@ def main():
     """
     args = parse_args()
 
+    # ---- 快速测试模式 ----
+    if args.quick_test:
+        logger.info("🚀 快速测试模式：使用100只股票，1年数据")
+        args.stocks = 100
+        args.start = '2024-01-01'
+        args.end = '2025-01-01'
+        # 注意：不设置 args.no_ml，保留 --use-rolling-ic 功能
+
     # ---- 日期推导 ----
     # 用户指定的是回测区间，数据区间自动向前扩展 DATA_LEAD_DAYS 天
     Config.BACKTEST_START = args.start
@@ -159,13 +176,20 @@ def main():
         pd.Timestamp(args.start) - timedelta(days=Config.DATA_LEAD_DAYS)
     ).strftime('%Y-%m-%d')
     Config.DATA_END_DATE = args.end
-
+    
     # ---- 其他参数 ----
     Config.STOCK_LIMIT = None if args.stocks == 0 else args.stocks
     Config.TOP_N_STOCKS = args.top_n
     Config.INITIAL_CASH = args.cash
-    use_rolling_ic = args.use_rolling_ic and not args.no_ml
-    use_rolling_ml = args.use_rolling_ml and not args.no_ml and not args.use_rolling_ic
+    
+    # 快速模式：强制禁用滚动IC/ML
+    if args.fast:
+        logger.info("⚡ 快速模式：跳过滚动IC/ML，使用简单线性加权")
+        use_rolling_ic = False
+        use_rolling_ml = False
+    else:
+        use_rolling_ic = args.use_rolling_ic and not args.no_ml
+        use_rolling_ml = args.use_rolling_ml and not args.no_ml and not args.use_rolling_ic
 
     # 验证日期格式
     for date_str, name in [
@@ -185,9 +209,9 @@ def main():
     logger.info(f"(数据比回测早 {Config.DATA_LEAD_DAYS} 天，用于指标预热)")
 
     logger.info("=" * 60)
-    logger.info("步骤1: 获取中证500成分股列表")
+    logger.info("步骤1: 获取指数成分股（沪深300+中证500+中证1000）")
     logger.info("=" * 60)
-    stocks_df = get_zz500_stocks()
+    stocks_df = get_multi_index_stocks()
 
     if stocks_df is None or stocks_df.empty:
         logger.error("无法获取成分股列表，回测终止")
@@ -223,91 +247,24 @@ def main():
     df = compute_all_indicators(df)
 
     # ---- 获取行业信息并合并 ----
-    logger.info("=" * 60)
-    logger.info("步骤3.5: 获取行业信息")
-    logger.info("=" * 60)
-    industry_map = get_stock_industry(stocks_df)
-    if industry_map:
-        df['industry'] = df['symbol'].map(
-            lambda x: industry_map.get(x.replace('sh.', '').replace('sz.', '').replace('bj.', ''), '未知')
-        )
-        logger.info("行业信息已合并到数据")
-    else:
-        logger.warning("未获取到行业信息，跳过行业中性化")
+    # 注意：当前策略未使用行业中性化，注释掉以节省时间
+    # logger.info("=" * 60)
+    # logger.info("步骤3.5: 获取行业信息")
+    # logger.info("=" * 60)
+    # industry_map = get_stock_industry(stocks_df)
+    # if industry_map:
+    #     df['industry'] = df['symbol'].map(
+    #         lambda x: industry_map.get(x.replace('sh.', '').replace('sz.', '').replace('bj.', ''), '未知')
+    #     )
+    #     logger.info("行业信息已合并到数据")
+    # else:
+    #     logger.warning("未获取到行业信息，跳过行业中性化")
 
     logger.info("=" * 60)
     logger.info("步骤4: 多因子打分与选股")
     logger.info("=" * 60)
 
-    # ---- 加载中证500指数数据用于市场状态判断 ----
-    logger.info("[动态权重] 加载中证500指数数据用于市场状态判断...")
-    df_index = pd.DataFrame()
-    try:
-        import sqlite3
-        db_path = Config.SQLITE_DB_PATH
-        conn = sqlite3.connect(db_path)
-        # 中证500指数代码在baostock中是 sh.000905
-        index_code = 'sh.000905'
-        query = """
-            SELECT date, open, high, low, close, volume
-            FROM daily_kline
-            WHERE code = ? AND date >= ? AND date <= ?
-            ORDER BY date
-        """
-        df_index = pd.read_sql_query(query, conn,
-                                     params=(index_code, Config.DATA_START_DATE, Config.DATA_END_DATE))
-        conn.close()
-
-        if not df_index.empty:
-            df_index['date'] = pd.to_datetime(df_index['date'])
-            df_index['open'] = pd.to_numeric(df_index['open'], errors='coerce')
-            df_index['high'] = pd.to_numeric(df_index['high'], errors='coerce')
-            df_index['low'] = pd.to_numeric(df_index['low'], errors='coerce')
-            df_index['close'] = pd.to_numeric(df_index['close'], errors='coerce')
-            df_index['volume'] = pd.to_numeric(df_index['volume'], errors='coerce')
-            logger.info(f"指数数据加载完成：{len(df_index)} 条记录")
-        else:
-            logger.warning("数据库中无中证500指数数据，尝试从baostock下载...")
-            import baostock as bs
-            lg = bs.login()
-            if lg.error_code == '0':
-                rs = bs.query_history_k_data_plus(
-                    index_code,
-                    'date,open,high,low,close,volume',
-                    start_date=Config.DATA_START_DATE,
-                    end_date=Config.DATA_END_DATE,
-                    frequency='d',
-                    adjustflag='3'
-                )
-                data_list = []
-                while rs.error_code == '0' and rs.next():
-                    data_list.append(rs.get_row_data())
-                bs.logout()
-
-                if data_list:
-                    df_index = pd.DataFrame(data_list, columns=rs.fields)
-                    df_index['date'] = pd.to_datetime(df_index['date'])
-                    for col in ['open', 'high', 'low', 'close', 'volume']:
-                        df_index[col] = pd.to_numeric(df_index[col], errors='coerce')
-                    # 保存到数据库
-                    df_index['code'] = index_code
-                    with sqlite3.connect(db_path) as conn:
-                        existing = conn.execute("SELECT date FROM daily_kline WHERE code = ?",
-                                               (index_code,)).fetchall()
-                        existing_dates = {row[0] for row in existing} if existing else set()
-                        new_rows = df_index[~df_index['date'].isin(existing_dates)]
-                        if not new_rows.empty:
-                            new_rows.to_sql('daily_kline', conn, if_exists='append', index=False)
-                    logger.info(f"指数数据下载完成：{len(df_index)} 条记录")
-                else:
-                    logger.error("无法获取指数数据，将使用固定权重")
-            else:
-                logger.error("baostock登录失败，将使用固定权重")
-    except Exception as e:
-        logger.warning(f"指数数据加载失败: {e}，将使用固定权重")
-        df_index = pd.DataFrame()
-
-    df = compute_factor_scores(df, df_index, use_rolling_ml=use_rolling_ml, use_rolling_ic=use_rolling_ic)
+    df = compute_factor_scores(df, use_rolling_ml=use_rolling_ml, use_rolling_ic=use_rolling_ic)
 
     logger.info("=" * 60)
     logger.info("步骤4.5: 因子评估")

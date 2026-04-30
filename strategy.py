@@ -128,13 +128,11 @@ def execute_strategy(ctx: ExecContext):
             ctx.sell_all_shares()
         return
 
-    # 情况2：无持仓且在前 TOP_N → 买入（需满足趋势过滤）
+    # 情况2：无持仓且在前 TOP_N → 直接买入（因子系统已全权负责选股决策）
     if ctx.symbol in top_symbols:
-        # 趋势过滤：仅买入收盘价在 20 日均线之上的股票（避免接飞刀）
-        if ctx.bars >= 20 and ctx.close[-1] >= np.mean(ctx.close[-20:]):
-            ctx.buy_shares = ctx.calc_target_shares(target_size)
-            ctx.buy_limit_price = ctx.close[-1]
-            ctx.hold_bars = Config.MIN_HOLD_BARS  # 强制持有至少 N 天
+        ctx.buy_shares = ctx.calc_target_shares(target_size)
+        ctx.buy_limit_price = ctx.close[-1]
+        ctx.hold_bars = Config.MIN_HOLD_BARS  # 强制持有至少 N 天
 
 
 # ============================================================

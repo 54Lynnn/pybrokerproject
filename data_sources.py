@@ -13,57 +13,75 @@ import sqlite3
 import threading
 import time
 
-def get_zz500_stocks():
+def get_multi_index_stocks():
     """
-    获取中证500成分股列表（带线程超时保护）。
-
-    中证500指数（000905）成分股，源自 akshare 的 index_stock_cons_csindex。
+    获取沪深300 + 中证500 + 中证1000 成分股合并列表（带线程超时保护）。
+    
+    三个指数共覆盖约1800只股票（市值排名前1800），
+    作为多因子选股的选股池和等权基准的计算基础。
+    
     该接口偶发网络卡死（不抛异常直接hang），因此使用子线程 + 超时方案。
     """
-    print("\n[数据] 正在通过 akshare 获取中证500成分股列表...")
+    print(f"\n[数据] 正在通过 akshare 获取指数成分股..."
+          f"\n       指数: 沪深300(000300) + 中证500(000905) + 中证1000(000852)")
 
-    max_retries = 3
-    for attempt in range(max_retries):
-        result = {}
-        t = threading.Thread(target=lambda: result.update(
-            {'df': ak.index_stock_cons_csindex(symbol=Config.INDEX_CODE)}
-        ), daemon=True)
-        t.start()
-        t.join(timeout=60)
+    all_stocks = []
+    index_names = {'000300': '沪深300', '000905': '中证500', '000852': '中证1000'}
 
-        if t.is_alive():
-            if attempt < max_retries - 1:
-                wait = (attempt + 1) * 5
-                print(f"  ⚠ akshare 超时（{attempt+1}/{max_retries}），{wait}秒后重试...")
-                time.sleep(wait)
-                continue
-            print(f"  ✗ akshare 多次超时，请稍后重试")
-            return None
+    for code in Config.INDEX_CODES:
+        name = index_names.get(code, code)
+        max_retries = 3
+        fetched = False
 
-        if 'df' not in result:
-            if attempt < max_retries - 1:
-                wait = (attempt + 1) * 5
-                print(f"  ⚠ 获取失败（{attempt+1}/{max_retries}），{wait}秒后重试...")
-                time.sleep(wait)
-                continue
-            print(f"  ✗ 获取中证500成分股失败")
-            return None
+        for attempt in range(max_retries):
+            result = {}
+            t = threading.Thread(target=lambda: result.update(
+                {'df': ak.index_stock_cons_csindex(symbol=code)}
+            ), daemon=True)
+            t.start()
+            t.join(timeout=60)
 
-        df = result['df']
-        stocks = df[['成分券代码', '成分券名称']].copy()
-        stocks.columns = ['code', 'name']
-        stocks = stocks.drop_duplicates(subset='code', keep='first')
-        stocks = stocks.reset_index(drop=True)
+            if t.is_alive():
+                if attempt < max_retries - 1:
+                    wait = (attempt + 1) * 5
+                    print(f"  ⚠ {name}({code}) 超时（{attempt+1}/{max_retries}），{wait}秒后重试...")
+                    time.sleep(wait)
+                    continue
+                print(f"  ✗ {name}({code}) 多次超时，跳过")
+                break
 
-        print(f"  ✓ 成功获取 {len(stocks)} 只中证500成分股")
+            if 'df' not in result:
+                if attempt < max_retries - 1:
+                    wait = (attempt + 1) * 5
+                    print(f"  ⚠ {name}({code}) 获取失败（{attempt+1}/{max_retries}），{wait}秒后重试...")
+                    time.sleep(wait)
+                    continue
+                print(f"  ✗ {name}({code}) 获取失败，跳过")
+                break
 
-        if Config.STOCK_LIMIT is not None and len(stocks) > Config.STOCK_LIMIT:
-            stocks = stocks.head(Config.STOCK_LIMIT)
-            print(f"  ⚠ 已限制为前 {Config.STOCK_LIMIT} 只股票（测试模式）")
+            df = result['df']
+            stocks = df[['成分券代码', '成分券名称']].copy()
+            stocks.columns = ['code', 'name']
+            all_stocks.append(stocks)
+            fetched = True
+            print(f"  ✓ {name}: {len(stocks)} 只成分股")
+            break
 
-        return stocks
+    if not all_stocks:
+        print(f"  ✗ 所有指数成分股获取失败")
+        return None
 
-    return None
+    merged = pd.concat(all_stocks, ignore_index=True)
+    merged = merged.drop_duplicates(subset='code', keep='first')
+    merged = merged.reset_index(drop=True)
+
+    print(f"  → 合并去重后共 {len(merged)} 只股票")
+
+    if Config.STOCK_LIMIT is not None and len(merged) > Config.STOCK_LIMIT:
+        merged = merged.head(Config.STOCK_LIMIT)
+        print(f"  ⚠ 已限制为前 {Config.STOCK_LIMIT} 只股票（测试模式）")
+
+    return merged
 
 
 def get_stock_industry(stocks_df):
@@ -71,11 +89,13 @@ def get_stock_industry(stocks_df):
     获取股票所属行业信息（使用akshare的stock_board_industry_ths接口）。
 
     返回：{code: industry_name} 字典
+    
+    注意：行业信息获取可能很慢，如果超时会自动跳过
     """
     print("\n[数据] 正在获取股票行业信息...")
 
     industry_map = {}
-    max_retries = 3
+    max_retries = 2  # 减少重试次数
 
     for attempt in range(max_retries):
         result = {}
@@ -83,11 +103,11 @@ def get_stock_industry(stocks_df):
             {'df': ak.stock_board_industry_name_ths()}
         ), daemon=True)
         t.start()
-        t.join(timeout=60)
+        t.join(timeout=30)  # 减少超时时间到30秒
 
         if t.is_alive() or 'df' not in result:
             if attempt < max_retries - 1:
-                wait = (attempt + 1) * 5
+                wait = (attempt + 1) * 3
                 print(f"  ⚠ 行业数据获取超时（{attempt+1}/{max_retries}），{wait}秒后重试...")
                 time.sleep(wait)
                 continue
@@ -105,9 +125,27 @@ def get_stock_industry(stocks_df):
             industry_names = industry_df[name_col].tolist()
             print(f"  发现 {len(industry_names)} 个行业板块，正在获取成分股...")
 
+            # 限制获取的行业数量，避免太慢
+            max_industries = 20
+            industry_names = industry_names[:max_industries]
+            
             for ind_name in industry_names:
                 try:
-                    cons_df = ak.stock_board_industry_cons_ths(symbol=ind_name)
+                    # 添加超时保护
+                    result = {}
+                    t = threading.Thread(
+                        target=lambda: result.update(
+                            {'df': ak.stock_board_industry_cons_ths(symbol=ind_name)}
+                        ),
+                        daemon=True
+                    )
+                    t.start()
+                    t.join(timeout=10)  # 每个行业最多10秒
+                    
+                    if t.is_alive() or 'df' not in result:
+                        continue  # 跳过超时的行业
+                    
+                    cons_df = result['df']
                     if cons_df is not None and not cons_df.empty:
                         # 列名可能是 '代码' 或 '个股代码' 或 'name'
                         code_col = None
@@ -217,12 +255,11 @@ def check_data_in_db(stock_code_bs):
     """
     检查数据库中某只股票的数据是否足够用于回测。
 
-    判断标准：
-      1. 请求区间内的数据条数 >= 100
-      2. 数据最早日期 <= 请求起始日期 + 14天容差
-      3. 数据最晚日期 >= 请求结束日期 - 14天容差
-
-    14天容差 ≈ 10个交易日，边界上差几天不影响指标预热。
+    优化后的判断标准（更宽松，避免重复下载）：
+      1. 数据条数 >= 100
+      2. 数据最早日期 <= 请求起始日期 + 30天容差
+      3. 数据最晚日期 >= 请求结束日期 - 30天容差
+      4. 或者：只要数据覆盖了请求区间的核心部分（至少80%）
     """
     db_path = Config.SQLITE_DB_PATH
     if not os.path.exists(db_path):
@@ -238,10 +275,20 @@ def check_data_in_db(stock_code_bs):
         if count is None or count < 100 or min_date is None:
             return False
 
-        # 14天日期容差（≈10个交易日）
-        tolerance = timedelta(days=14)
+        # 30天日期容差（更宽松，避免重复下载）
+        tolerance = timedelta(days=30)
         data_start_ok = pd.Timestamp(min_date) <= pd.Timestamp(Config.DATA_START_DATE) + tolerance
         data_end_ok = max_date is None or pd.Timestamp(max_date) >= pd.Timestamp(Config.DATA_END_DATE) - tolerance
+
+        # 如果日期范围不满足，检查是否覆盖了请求区间的核心部分（至少80%）
+        if not (data_start_ok and data_end_ok):
+            request_days = (pd.Timestamp(Config.DATA_END_DATE) - pd.Timestamp(Config.DATA_START_DATE)).days
+            data_days = (pd.Timestamp(max_date) - pd.Timestamp(min_date)).days
+            coverage_ratio = data_days / request_days if request_days > 0 else 0
+            
+            # 如果数据覆盖了请求区间的80%以上，也认为足够
+            if coverage_ratio >= 0.8 and count >= 200:
+                return True
 
         return data_start_ok and data_end_ok
 

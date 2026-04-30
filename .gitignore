@@ -5,6 +5,12 @@ stock_kline_cache.db
 # 回测图表（自动生成）
 图表/
 
+# 回测结果（自动生成）
+results/
+
+# 日志文件（自动生成）
+logs/
+
 # Python
 __pycache__/
 *.pyc

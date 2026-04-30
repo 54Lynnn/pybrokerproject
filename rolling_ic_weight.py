@@ -146,28 +146,24 @@ class RollingICWeighter:
                 weights[factor] = 0.0
                 continue
             
-            # 权重 = |IC| * sign(IC)  # 保持方向
-            # 但我们要的是正向预测能力，所以用IC的绝对值作为权重基础
+            # 权重 = IC的绝对值 * IC的符号
+            # 这样能保持因子的预测方向
             weight_base = abs(ic)
+            weight_sign = np.sign(ic)
             
-            weights[factor] = weight_base
+            weights[factor] = weight_base * weight_sign
         
-        # 归一化权重（使总和为1）
-        total_weight = sum(weights.values())
-        if total_weight > 0:
-            weights = {k: v / total_weight for k, v in weights.items()}
+        # 归一化权重：对绝对值进行归一化，保持符号不变
+        total_abs_weight = sum(abs(w) for w in weights.values())
+        if total_abs_weight > 0:
+            weights = {k: v / total_abs_weight for k, v in weights.items()}
         else:
             # 如果所有因子IC都太低，使用等权
             weights = {k: 1.0 / len(factor_names) for k in factor_names}
         
         # 限制最大/最小权重
         for factor in weights:
-            weights[factor] = np.clip(weights[factor], self.min_weight, self.max_weight)
-        
-        # 再次归一化
-        total_weight = sum(weights.values())
-        if total_weight > 0:
-            weights = {k: v / total_weight for k, v in weights.items()}
+            weights[factor] = np.clip(weights[factor], -self.max_weight, self.max_weight)
         
         self.current_weights = weights
         self.last_update_date = pd.to_datetime(current_date)
@@ -231,7 +227,7 @@ class RollingICWeighter:
                 # 计算加权得分
                 scores = np.zeros(len(day_df))
                 for factor, weight in self.current_weights.items():
-                    if factor in day_df.columns and weight > 0:
+                    if factor in day_df.columns and abs(weight) > 0.0001:
                         scores += day_df[factor].fillna(0).values * weight
                 
                 # 回填得分

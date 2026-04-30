@@ -18,6 +18,36 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _compute_equal_weight_benchmark(df, start_date, end_date):
+    """
+    计算成分股每日等权平均收益率作为基准。
+    
+    使用选股池内所有股票（沪深300+中证500+中证1000，约1800只）
+    的每日涨跌幅等权平均作为基准收益率。
+    
+    与市值加权指数不同，等权基准对每只股票一视同仁，
+    更公平地反映多因子选股策略的超额收益能力。
+    
+    Args:
+        df: 包含 pctChg 列的完整数据 DataFrame
+        start_date, end_date: 回测区间
+    
+    Returns:
+        pd.Series: index=date, values=日收益率（小数，如0.01表示1%）
+    """
+    df_filtered = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
+    df_filtered['date'] = pd.to_datetime(df_filtered['date'])
+    
+    # 等权平均：每天所有股票的 pctChg 均值
+    benchmark = df_filtered.groupby('date')['pctChg'].mean() / 100.0
+    benchmark = benchmark.sort_index()
+    
+    n_stocks = df_filtered['symbol'].nunique()
+    print(f"  ✓ 等权基准：{n_stocks} 只股票，{len(benchmark)} 个交易日")
+    return benchmark
+
+
 def run_backtest(df):
     """
     使用 pybroker 执行多因子选股策略回测（官方轮动交易模式）。
@@ -100,10 +130,14 @@ def run_backtest(df):
 
     # ---- 执行回测 ----
     logger.info("正在执行回测，请稍候...")
+    print("  ⏳ 回测执行中（约30秒），请稍候...")
+    pyb.disable_progress_bar()
     result = strategy.backtest(
         warmup=20,
         disable_parallel=False,
     )
+    pyb.enable_progress_bar()
+    print("  ✅ 回测完成！")
 
     logger.info("回测完成！")
     return result
@@ -135,115 +169,42 @@ def display_results(result, df):
     # 使用 result.metrics (EvalMetrics dataclass) 直接取字段
     m = result.metrics
 
-    # ---- 计算基准数据（中证500指数） ----
+    # ---- 计算基准数据（成分股等权平均） ----
+    # 用选股池内所有股票（沪深300+中证500+中证1000）的每日等权平均作为基准
     benchmark_data = {}
-    try:
-        import baostock as bs
-        import sqlite3
+    benchmark_returns = _compute_equal_weight_benchmark(df, Config.BACKTEST_START, Config.BACKTEST_END)
 
-        # 从SQLite数据库查询中证500指数(000905)数据
-        db_path = Config.SQLITE_DB_PATH
-        conn = sqlite3.connect(db_path)
+    if benchmark_returns is not None and len(benchmark_returns) > 0:
+        log_returns = np.log1p(benchmark_returns)
+        benchmark_return = np.expm1(log_returns.sum())
+        benchmark_return_pct = benchmark_return * 100
 
-        # 中证500指数代码在baostock中是 sh.000905
-        index_code = 'sh.000905'
+        # 计算基准的最大回撤
+        benchmark_cum = (1 + benchmark_returns).cumprod()
+        benchmark_peak = benchmark_cum.expanding().max()
+        benchmark_drawdown = (benchmark_cum - benchmark_peak) / benchmark_peak
+        benchmark_max_dd = benchmark_drawdown.min() * 100
 
-        # 查询指数数据（使用close价格计算收益率，因为pctChg可能为空）
-        query = """
-            SELECT date, close FROM daily_kline
-            WHERE code = ? AND date >= ? AND date <= ?
-            ORDER BY date
-        """
+        # 计算基准的夏普比率（假设无风险利率为3%）
+        risk_free_rate = 0.03
+        excess_daily = benchmark_returns - risk_free_rate / 252
+        benchmark_sharpe = (excess_daily.mean() / excess_daily.std()) * np.sqrt(252) if excess_daily.std() != 0 else 0
 
-        # 使用回测的设定日期范围（确保与回测区间一致）
-        bt_start = Config.BACKTEST_START
-        bt_end = Config.BACKTEST_END
+        # 计算基准的索提诺比率
+        downside = excess_daily[excess_daily < 0]
+        benchmark_sortino = (excess_daily.mean() / downside.std()) * np.sqrt(252) if len(downside) > 0 and downside.std() != 0 else 0
 
-        index_df = pd.read_sql_query(query, conn, params=(index_code, bt_start, bt_end))
-        conn.close()
+        benchmark_data = {
+            'return': benchmark_return_pct,
+            'max_dd': benchmark_max_dd,
+            'sharpe': benchmark_sharpe,
+            'sortino': benchmark_sortino
+        }
 
-        if not index_df.empty and index_df['close'].notna().sum() > 0:
-            # 用close价格计算日收益率
-            index_df['close'] = pd.to_numeric(index_df['close'], errors='coerce')
-            index_df = index_df.dropna(subset=['close'])
-            daily_returns = index_df['close'].pct_change().dropna()
-            log_returns = np.log1p(daily_returns)
-            benchmark_return = np.expm1(log_returns.sum())
-            benchmark_return_pct = benchmark_return * 100
-
-            # 计算基准的最大回撤、夏普比率、索提诺比率
-            benchmark_cum = (1 + daily_returns).cumprod()
-            benchmark_peak = benchmark_cum.expanding().max()
-            benchmark_drawdown = (benchmark_cum - benchmark_peak) / benchmark_peak
-            benchmark_max_dd = benchmark_drawdown.min() * 100
-
-            # 计算基准的夏普比率（假设无风险利率为3%）
-            risk_free_rate = 0.03
-            excess_daily = daily_returns - risk_free_rate / 252
-            benchmark_sharpe = (excess_daily.mean() / excess_daily.std()) * np.sqrt(252) if excess_daily.std() != 0 else 0
-
-            # 计算基准的索提诺比率
-            downside = excess_daily[excess_daily < 0]
-            benchmark_sortino = (excess_daily.mean() / downside.std()) * np.sqrt(252) if len(downside) > 0 and downside.std() != 0 else 0
-
-            benchmark_data = {
-                'return': benchmark_return_pct,
-                'max_dd': benchmark_max_dd,
-                'sharpe': benchmark_sharpe,
-                'sortino': benchmark_sortino
-            }
-        else:
-            # 如果数据库中没有指数数据，尝试实时获取
-            print("  ⚠ 数据库中无中证500指数数据，尝试从baostock获取...")
-            lg = bs.login()
-            if lg.error_code == '0':
-                rs = bs.query_history_k_data_plus(
-                    index_code,
-                    'date,close',
-                    start_date=bt_start,
-                    end_date=bt_end,
-                    frequency='d',
-                    adjustflag='3'
-                )
-                data_list = []
-                while rs.error_code == '0' and rs.next():
-                    data_list.append(rs.get_row_data())
-                bs.logout()
-
-                if data_list:
-                    index_df = pd.DataFrame(data_list, columns=rs.fields)
-                    index_df['close'] = pd.to_numeric(index_df['close'], errors='coerce')
-                    index_df = index_df.dropna(subset=['close'])
-                    daily_returns = index_df['close'].pct_change().dropna()
-                    log_returns = np.log1p(daily_returns)
-                    benchmark_return = np.expm1(log_returns.sum())
-                    benchmark_return_pct = benchmark_return * 100
-
-                    # 计算基准指标
-                    benchmark_cum = (1 + daily_returns).cumprod()
-                    benchmark_peak = benchmark_cum.expanding().max()
-                    benchmark_drawdown = (benchmark_cum - benchmark_peak) / benchmark_peak
-                    benchmark_max_dd = benchmark_drawdown.min() * 100
-
-                    risk_free_rate = 0.03
-                    excess_daily = daily_returns - risk_free_rate / 252
-                    benchmark_sharpe = (excess_daily.mean() / excess_daily.std()) * np.sqrt(252) if excess_daily.std() != 0 else 0
-
-                    downside = excess_daily[excess_daily < 0]
-                    benchmark_sortino = (excess_daily.mean() / downside.std()) * np.sqrt(252) if len(downside) > 0 and downside.std() != 0 else 0
-
-                    benchmark_data = {
-                        'return': benchmark_return_pct,
-                        'max_dd': benchmark_max_dd,
-                        'sharpe': benchmark_sharpe,
-                        'sortino': benchmark_sortino
-                    }
-                else:
-                    benchmark_data = {'return': 0.0, 'max_dd': 0.0, 'sharpe': 0.0, 'sortino': 0.0}
-            else:
-                benchmark_data = {'return': 0.0, 'max_dd': 0.0, 'sharpe': 0.0, 'sortino': 0.0}
-    except Exception as e:
-        print(f"  ⚠ 基准数据计算失败: {e}")
+        # 保存基准日收益率供图表使用
+        display_results.benchmark_returns = benchmark_returns
+    else:
+        print("  ⚠ 无法计算等权基准收益率")
         benchmark_data = {'return': 0.0, 'max_dd': 0.0, 'sharpe': 0.0, 'sortino': 0.0}
 
     # 计算超额收益率
@@ -267,7 +228,7 @@ def display_results(result, df):
         print(f"  {'最终市值':<14}: {m.end_market_value:>12,.2f} 元")
 
     # ---- 基准表现框 ----
-    print(f"\n  【基准表现 - 中证500指数】")
+    print(f"\n  【基准表现 - 成分股等权平均】")
     print(f"  {'-' * 40}")
     print(f"  {'基准收益率':<14}: {benchmark_data.get('return', 0):>10.2f}%")
     print(f"  {'最大回撤':<14}: {benchmark_data.get('max_dd', 0):>10.2f}%")
@@ -405,9 +366,12 @@ def plot_results(result, df):
         print("  ✗ 无法获取投资组合数据，跳过绘图")
         return
 
-    # ---- 计算基准收益（中证500等权） ----
-    # 使用所有股票的平均每日涨跌幅作为基准
-    benchmark_returns = df.groupby('date')['pctChg'].mean() / 100.0
+    # ---- 计算基准收益（成分股等权平均） ----
+    # 优先使用 display_results 已计算的等权基准，避免重复计算
+    if hasattr(display_results, 'benchmark_returns') and display_results.benchmark_returns is not None:
+        benchmark_returns = display_results.benchmark_returns
+    else:
+        benchmark_returns = _compute_equal_weight_benchmark(df, Config.BACKTEST_START, Config.BACKTEST_END)
     benchmark_returns = benchmark_returns.sort_index()
 
     # ---- 准备绘图数据 ----
@@ -445,7 +409,7 @@ def plot_results(result, df):
     # 基准净值（从累计收益反推）
     benchmark_cum = (1 + benchmark_aligned).cumprod()
     ax1.plot(portfolio_df['date'], benchmark_cum.values,
-             label='基准 (中证500等权)', color='#FF9800', linewidth=1, linestyle='--', alpha=0.7)
+             label='基准 (成分股等权)', color='#FF9800', linewidth=1, linestyle='--', alpha=0.7)
 
     ax1.axhline(y=1.0, color='gray', linestyle=':', alpha=0.5)
     ax1.set_title('净值曲线', fontsize=13, fontweight='bold')

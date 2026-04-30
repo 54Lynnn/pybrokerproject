@@ -205,6 +205,83 @@ def generate_factors(df):
         factors['f_macd_momentum'] = np.clip(factors['f_macd_momentum'], 0, 1)
     
     # ============================================================
+    # 9. 新增因子（提升因子多样性，专为XGBoost设计）
+    # ============================================================
+    
+    # 9.1 价格位置因子：当前收盘价在N日区间的位置（0~1）
+    for window in [10, 20, 60]:
+        rolling_high = df.groupby('symbol')['close'].transform(
+            lambda x: x.rolling(window, min_periods=5).max()
+        ).fillna(0).values
+        rolling_low = df.groupby('symbol')['close'].transform(
+            lambda x: x.rolling(window, min_periods=5).min()
+        ).fillna(0).values
+        range_ = rolling_high - rolling_low
+        range_ = np.where(range_ > 0, range_, 1)
+        price_pos = (close - rolling_low) / range_
+        # 在低位（<0.2）和高位（>0.8）分别赋值，中间区域为0
+        factors[f'f_price_pos_{window}'] = np.where(
+            price_pos < 0.2, -1 + price_pos / 0.2,
+            np.where(price_pos > 0.8, (price_pos - 0.8) / 0.2, 0)
+        )
+    
+    # 9.2 乖离率：收盘价偏离20日均线的程度
+    if 'ma_20' in df.columns:
+        ma20 = df['ma_20'].fillna(0).values
+        ma20 = np.where(ma20 > 0, ma20, close)
+        bias = (close - ma20) / ma20
+        factors['f_bias_20'] = np.clip(bias, -0.15, 0.15)
+    
+    # 9.3 连续涨跌天数（短期趋势强度，按股票分组计算）
+    pct_chg = df.groupby('symbol')['close'].transform(
+        lambda x: x.pct_change()
+    ).fillna(0).values
+    
+    # 简化：用涨跌幅的滚动和代替连涨/连跌天数的计算
+    # 连续3日上涨的和 vs 连续3日下跌的和
+    up_sum_3 = df.groupby('symbol')['close'].transform(
+        lambda x: x.pct_change().fillna(0).rolling(3, min_periods=1).sum()
+    ).fillna(0).values
+    down_sum_3 = df.groupby('symbol')['close'].transform(
+        lambda x: (-x.pct_change()).fillna(0).rolling(3, min_periods=1).sum()
+    ).fillna(0).values
+    
+    factors['f_rally_strength'] = np.clip(up_sum_3, 0, 0.3) * 3
+    factors['f_decline_strength'] = np.clip(down_sum_3, 0, 0.3) * 3
+    
+    # 9.4 波动率变化（短期/长期波动率比）
+    vol_5 = df.groupby('symbol')['close'].transform(
+        lambda x: x.pct_change().rolling(5, min_periods=3).std()
+    ).fillna(0.01).values
+    vol_60 = df.groupby('symbol')['close'].transform(
+        lambda x: x.pct_change().rolling(60, min_periods=20).std()
+    ).fillna(0.01).values
+    vol_5_clip = np.clip(vol_5, 0.001, 0.5)
+    vol_60_clip = np.clip(vol_60, 0.001, 0.5)
+    vol_ratio = vol_5_clip / vol_60_clip
+    factors['f_vol_ratio'] = np.clip(vol_ratio, 0, 3)
+    
+    # 9.5 成交量冲击：当日成交量相对20日均量的偏离
+    if 'volume' in df.columns:
+        vol_ma20 = df.groupby('symbol')['volume'].transform(
+            lambda x: x.rolling(20, min_periods=5).mean()
+        ).fillna(0).values
+        vol_current = df['volume'].fillna(0).values
+        vol_ma20 = np.where(vol_ma20 > 0, vol_ma20, vol_current)
+        vol_ratio_v = (vol_current - vol_ma20) / vol_ma20
+        factors['f_vol_shock'] = np.clip(vol_ratio_v, -0.8, 3.0)
+    
+    # 9.6 资金流向代理（涨幅×量比，判断资金介入）
+    if 'volume' in df.columns:
+        volume_ratio_col = df['volume_ratio'].fillna(1).values if 'volume_ratio' in df.columns else np.ones(len(df))
+        factors['f_money_flow'] = np.where(
+            (pct_chg > 0) & (volume_ratio_col > 1.2),
+            pct_chg * volume_ratio_col,
+            0
+        )
+        factors['f_money_flow'] = np.clip(factors['f_money_flow'], 0, 0.1) * 10
+    
+    # ============================================================
     # 将因子合并到DataFrame
     # ============================================================
     

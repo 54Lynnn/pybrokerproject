@@ -40,7 +40,7 @@ class RollingXGBoostScorer:
         retrain_freq=63,         # 重训练频率（交易日，约3个月）
         forward_days=5,          # 预测未来N日收益
         min_train_samples=500,   # 最小训练样本数
-        ic_threshold=0.02,       # 因子IC筛选阈值
+        ic_threshold=0.015,       # 因子IC筛选阈值
         # XGBoost参数（强正则化）
         n_estimators=50,         # 减少树数量
         max_depth=3,             # 浅层树
@@ -48,7 +48,7 @@ class RollingXGBoostScorer:
         subsample=0.7,           # 行采样
         colsample_bytree=0.7,    # 列采样
         reg_alpha=1.0,           # L1正则化
-        reg_lambda=2.0,          # L2正则化
+        reg_lambda=5.0,          # L2正则化
         min_child_weight=10,     # 最小叶子样本数
         random_state=42
     ):
