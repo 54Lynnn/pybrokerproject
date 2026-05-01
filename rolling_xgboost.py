@@ -72,6 +72,7 @@ class RollingXGBRanker:
         self.xgb_params = {
             'objective': 'rank:ndcg',      # 排序学习目标：NDCG
             'eval_metric': 'ndcg@10',      # 评估指标：前10名NDCG
+            'ndcg_exp_gain': False,        # 使用线性增益（标签值可>31，兼容每日1800只股票）
             'n_estimators': n_estimators,
             'max_depth': max_depth,
             'learning_rate': learning_rate,
@@ -134,9 +135,13 @@ class RollingXGBRanker:
         # 按日期排序，确保group顺序一致
         df_temp = df_temp.sort_values('date').reset_index(drop=True)
         
-        # 在每一天内，按收益率排序生成标签
-        # label越大 = 未来收益越高 = 应排越前面（ndcg要求大值在前）
-        df_temp['label'] = df_temp.groupby('date')['fwd_return'].rank(ascending=True)
+        # 分位数标签：按未来收益分为10组（1~10）
+        # 用分位数代替原始排名更稳健：
+        #   - 原始排名：每天有1800级标签，模型过度关注极端值
+        #   - 分位数：每天只有10级，模型学"好/中/差"的区分，更抗过拟合
+        df_temp['label'] = df_temp.groupby('date')['fwd_return'].transform(
+            lambda x: pd.qcut(x, q=10, labels=False, duplicates='drop') + 1
+        )
         
         X = df_temp[factor_names].values
         y = df_temp['label'].values.astype(int)
