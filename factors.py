@@ -11,7 +11,7 @@
 
 from config import Config
 from factor_engineering import generate_factors, standardize_factors
-from rolling_xgboost import RollingXGBoostScorer
+from rolling_xgboost import RollingXGBRanker
 from rolling_ic_weight_fast import RollingICWeighterFast as RollingICWeighter
 import numpy as np
 import pandas as pd
@@ -27,7 +27,7 @@ def compute_factor_scores(df, use_ml=False, use_rolling_ml=False, use_rolling_ic
     权重分配方式：
       --fast / 默认: 固定线性加权（Config.FACTOR_WEIGHTS）
       --use-rolling-ic: 滚动IC加权（IC数据驱动权重，60日滚动窗口）
-      --use-rolling-ml: 滚动XGBoost机器学习（全因子输入，自动学习权重）
+      --use-rolling-ml: 滚动XGBoost排序学习（全因子输入，自动学习排序）
 
     所有选股结果通过 SELECTION_MAP 传递给执行层，
     执行层直接买入，不加任何额外过滤器。
@@ -36,7 +36,7 @@ def compute_factor_scores(df, use_ml=False, use_rolling_ml=False, use_rolling_ic
     if use_rolling_ic:
         logger.info("模式: 滚动IC加权（无未来函数）")
     elif use_rolling_ml:
-        logger.info("模式: 滚动XGBoost机器学习（无未来函数）")
+        logger.info("模式: 滚动XGBoost排序学习（无未来函数）")
     elif use_ml:
         logger.info("模式: XGBoost机器学习（旧版，不推荐）")
     else:
@@ -110,40 +110,34 @@ def compute_factor_scores(df, use_ml=False, use_rolling_ml=False, use_rolling_ic
             import traceback
             logger.error(traceback.format_exc())
 
-    # ===== Step 6: 滚动XGBoost（如果启用） =====
+    # ===== Step 6: 滚动XGBoost排序学习（如果启用） =====
     if use_rolling_ml:
-        logger.info("\n正在使用滚动XGBoost计算ML得分...")
-        logger.info("  注意：前60个交易日将使用线性加权（积累足够训练数据）")
+        logger.info("\n正在使用滚动XGBoost排序学习计算ML得分...")
+        logger.info("  注意：前252个交易日将使用线性加权（积累足够排序训练数据）")
         
-        # XGBoost使用全部因子，让模型自己学习特征重要性
-        # 不同于线性加权需要筛选因子，XGBoost能自动处理特征冗余和重要性排序
-        ml_factor_names = factor_names[:]  # 全部24个因子
-        logger.info(f"  滚动XGBoost使用全部 {len(ml_factor_names)} 个因子")
+        # 使用全部因子！排序学习对弱因子更鲁棒，不会过拟合
+        ml_factor_names = factor_names[:]
+        logger.info(f"  滚动XGBRanker使用全部 {len(ml_factor_names)} 个因子")
         
         try:
-            # 根据数据量自动调整参数
-            n_samples = len(df)
             n_stocks = df['symbol'].nunique()
+            min_train_samples = max(10000, n_stocks * 10)
             
-            # 小样本时降低要求
-            min_train_samples = max(100, n_stocks * 10)
+            logger.info(f"  数据量: {len(df)}条, {n_stocks}只股票")
             
-            logger.info(f"  数据量: {n_samples}条, {n_stocks}只股票")
-            
-            scorer = RollingXGBoostScorer(
-                train_window=252,          # 1年训练窗口（更稳定）
-                retrain_freq=42,           # 每2个月重训练
+            scorer = RollingXGBRanker(
+                train_window=252,          # 1年训练窗口
+                retrain_freq=63,           # 每3个月重训练
                 forward_days=5,
-                ic_threshold=0.015,        # 只保留IC绝对值>0.015的因子
                 min_train_samples=min_train_samples,
-                n_estimators=50,           # 减少树数量，防过拟合
-                max_depth=3,               # 浅层树，防止学到虚假规律
-                learning_rate=0.05,
-                subsample=0.7,
-                colsample_bytree=0.7,
-                reg_alpha=1.0,
-                reg_lambda=5.0,            # 更强的L2正则化
-                min_child_weight=10,       # 叶子节点最少样本数
+                n_estimators=100,          # 排序学习需要更多树
+                max_depth=4,               # 排序比回归抗噪，可稍深
+                learning_rate=0.1,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                reg_alpha=0.5,
+                reg_lambda=2.0,            # 排序比回归需要更少正则化
+                min_child_weight=5,
             )
             df = scorer.compute_scores(df, ml_factor_names)
             
@@ -155,13 +149,13 @@ def compute_factor_scores(df, use_ml=False, use_rolling_ml=False, use_rolling_ic
                 logger.info(f"  覆盖交易日: {df[df['ml_score'].notna()]['date'].nunique()}/{total_days}")
                 if valid_ml > 0:
                     df['composite_score'] = df['ml_score'].fillna(df['composite_score'])
-                    logger.info("✓ 滚动XGBoost得分已融合（缺失部分用线性加权填充）")
+                    logger.info("✓ 滚动XGBRanker排序得分已融合（缺失部分用线性加权填充）")
                 else:
                     logger.warning("  ML得分无效，全程使用线性加权")
             else:
                 logger.warning("  未生成ML得分，全程使用线性加权")
         except Exception as e:
-            logger.error(f"滚动XGBoost失败，回退到线性加权: {e}")
+            logger.error(f"滚动XGBRanker失败，回退到线性加权: {e}")
             import traceback
             logger.error(traceback.format_exc())
 

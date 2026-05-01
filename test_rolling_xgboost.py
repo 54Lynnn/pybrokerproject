@@ -58,7 +58,7 @@ def test_future_function_risk():
     logger.info("测试1: 未来函数风险检查")
     logger.info("="*60)
     
-    from rolling_xgboost import RollingXGBoostScorer
+    from rolling_xgboost import RollingXGBRanker
     
     # 创建测试数据
     df = create_test_data(n_days=300, n_stocks=20)
@@ -69,7 +69,7 @@ def test_future_function_risk():
     logger.info(f"测试日期: {test_date}")
     
     # 创建scorer并训练到测试日期
-    scorer = RollingXGBoostScorer(
+    scorer = RollingXGBRanker(
         train_window=100,
         retrain_freq=30,
         forward_days=5,
@@ -112,12 +112,12 @@ def test_rolling_training():
     logger.info("测试2: 滚动训练机制")
     logger.info("="*60)
     
-    from rolling_xgboost import RollingXGBoostScorer
+    from rolling_xgboost import RollingXGBRanker
     
     df = create_test_data(n_days=400, n_stocks=30)
     factor_names = ['f_reversal_5', 'f_momentum_60', 'f_volatility_20_inv']
     
-    scorer = RollingXGBoostScorer(
+    scorer = RollingXGBRanker(
         train_window=100,
         retrain_freq=50,
         forward_days=5,
@@ -145,9 +145,9 @@ def test_ic_filter():
     logger.info("测试3: 因子IC筛选")
     logger.info("="*60)
     
-    from rolling_xgboost import RollingXGBoostScorer
+    from rolling_xgboost import RollingXGBRanker
     
-    # 创建有明确IC关系的数据
+    # 创建有明确排序关系的数据
     np.random.seed(42)
     n_days = 200
     n_stocks = 20
@@ -157,12 +157,10 @@ def test_ic_filter():
     
     data = []
     for symbol in symbols:
-        # 强反转因子（IC高）
+        # 强反转因子（与未来收益负相关 → 反转效应）
         reversal = np.random.normal(0, 1, n_days)
-        # 弱随机因子（IC低）
-        random_factor = np.random.normal(0, 1, n_days)
         
-        # 价格：与反转因子负相关（反转效应）
+        # 价格
         returns = -0.01 * reversal + np.random.normal(0, 0.01, n_days)
         prices = 100 * np.exp(np.cumsum(returns))
         
@@ -172,24 +170,25 @@ def test_ic_filter():
                 'symbol': symbol,
                 'close': prices[i],
                 'f_strong_reversal': reversal[i],
-                'f_weak_random': random_factor[i],
+                'f_weak_random': np.random.normal(0, 1),
             })
     
     df = pd.DataFrame(data)
     factor_names = ['f_strong_reversal', 'f_weak_random']
     
-    scorer = RollingXGBoostScorer(ic_threshold=0.03)
+    scorer = RollingXGBRanker(
+        train_window=50,
+        retrain_freq=30,
+        forward_days=5,
+        min_train_samples=500,
+    )
+    df = scorer.compute_scores(df, factor_names)
     
-    # 训练并筛选因子
-    test_date = dates[150]
-    scorer.train(df, test_date, factor_names)
-    
-    logger.info(f"有效因子: {scorer.valid_factors}")
-    
-    if 'f_strong_reversal' in scorer.valid_factors:
-        logger.info("✓ IC筛选正确：强因子被保留")
-    if 'f_weak_random' not in scorer.valid_factors:
-        logger.info("✓ IC筛选正确：弱因子被剔除")
+    if 'ml_score' in df.columns:
+        valid_count = df['ml_score'].notna().sum()
+        logger.info(f"✓ Ranker预测完成：{valid_count}条有效得分")
+    else:
+        logger.error("✗ Ranker预测失败")
 
 
 def test_full_pipeline():
@@ -198,13 +197,19 @@ def test_full_pipeline():
     logger.info("测试4: 完整流程测试")
     logger.info("="*60)
     
-    from rolling_xgboost import compute_ml_factor_scores
+    from rolling_xgboost import RollingXGBRanker
     
     df = create_test_data(n_days=300, n_stocks=20)
     factor_names = ['f_reversal_5', 'f_momentum_60', 'f_volatility_20_inv']
     
     # 运行完整流程
-    result_df = compute_ml_factor_scores(df, factor_names)
+    scorer = RollingXGBRanker(
+        train_window=80,
+        retrain_freq=30,
+        forward_days=5,
+        min_train_samples=500,
+    )
+    result_df = scorer.compute_scores(df, factor_names)
     
     # 检查结果
     valid_scores = result_df['ml_score'].dropna()
@@ -212,7 +217,6 @@ def test_full_pipeline():
     logger.info(f"  总样本: {len(result_df)}")
     logger.info(f"  有效得分: {len(valid_scores)}")
     logger.info(f"  得分范围: [{valid_scores.min():.4f}, {valid_scores.max():.4f}]")
-    logger.info(f"  排名范围: [{result_df['rank'].min():.0f}, {result_df['rank'].max():.0f}]")
     
     if len(valid_scores) > 0:
         logger.info("✓ 完整流程测试通过")
